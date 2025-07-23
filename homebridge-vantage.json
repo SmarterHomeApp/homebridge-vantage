@@ -1,0 +1,76 @@
+{
+  "pluginAlias": "VantageControls",
+  "pluginType": "platform",
+  "headerDisplay": "Vantage Controls InFusion Plugin",
+  "footerDisplay": "For more information, see the [README](https://github.com/yourusername/homebridge-vantage)",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Platform Name",
+        "type": "string",
+        "required": true,
+        "default": "Vantage Controls"
+      },
+      "ipaddress": {
+        "title": "IP Address",
+        "type": "string",
+        "required": true,
+        "format": "ipv4",
+        "description": "IP address of your InFusion controller"
+      },
+      "username": {
+        "title": "Username",
+        "type": "string",
+        "required": false,
+        "description": "Username for authentication (if required)"
+      },
+      "password": {
+        "title": "Password",
+        "type": "string",
+        "required": false,
+        "description": "Password for authentication (if required)"
+      },
+      "usecache": {
+        "title": "Use Cache",
+        "type": "boolean",
+        "required": false,
+        "default": true,
+        "description": "Use cached configuration to speed up discovery"
+      },
+      "omit": {
+        "title": "Omit Devices",
+        "type": "string",
+        "required": false,
+        "description": "Comma-separated list of VIDs to exclude from discovery"
+      },
+      "range": {
+        "title": "Device Range",
+        "type": "string",
+        "required": false,
+        "description": "Comma-separated VID range (min,max) to limit discovery"
+      }
+    }
+  },
+  "form": [
+    {
+      "type": "fieldset",
+      "title": "Connection Settings",
+      "items": [
+        "name",
+        "ipaddress",
+        "username",
+        "password"
+      ]
+    },
+    {
+      "type": "fieldset",
+      "title": "Discovery Options",
+      "items": [
+        "usecache",
+        "omit",
+        "range"
+      ]
+    }
+  ]
+} 

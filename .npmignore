@@ -1,0 +1,56 @@
+# Source files
+src/
+*.ts
+*.tsx
+
+# Development files
+.github/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build tools
+tsconfig.json
+.eslintrc.js
+nodemon.json
+
+# Documentation
+CONTRIBUTING.md
+CHANGELOG.md
+CODE_OF_CONDUCT.md
+SECURITY.md
+
+# Development dependencies
+node_modules/
+
+# Test files
+test/
+tests/
+*.test.js
+*.test.ts
+*.spec.js
+*.spec.ts
+
+# CI/CD
+.github/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+
+# Homebridge specific
+config.json
+homebridge-vantage.json 

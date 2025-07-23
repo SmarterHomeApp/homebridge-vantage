@@ -1,0 +1,56 @@
+{
+  "name": "homebridge-vantage",
+  "displayName": "Vantage Controls",
+  "version": "1.0.0",
+  "description": "Homebridge plugin for Vantage Controls InFusion system",
+  "main": "dist/index.js",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "watch": "npm run build && npm link && nodemon",
+    "dev": "npm run build && npm link",
+    "prepublishOnly": "npm run build",
+    "lint": "eslint src/**.ts",
+    "lint:fix": "eslint src/**.ts --fix"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "vantage",
+    "controls",
+    "infusion",
+    "lighting",
+    "thermostat",
+    "blinds"
+  ],
+  "engines": {
+    "node": ">=18.0.0",
+    "homebridge": ">=1.6.0"
+  },
+  "dependencies": {
+    "net": "^1.0.2",
+    "tls": "^0.0.1",
+    "sprintf-js": "^1.1.2",
+    "xml2json": "^0.12.0",
+    "libxmljs": "^0.19.7",
+    "sleep": "^6.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "homebridge": "^1.6.0",
+    "nodemon": "^3.0.0",
+    "typescript": "^5.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/homebridge-vantage.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/homebridge-vantage/issues"
+  },
+  "homepage": "https://github.com/yourusername/homebridge-vantage#readme",
+  "author": "Your Name",
+  "license": "MIT"
+} 
