@@ -3,10 +3,12 @@ import * as tls from 'tls';
 import * as fs from 'fs';
 import * as sprintf from 'sprintf-js';
 
-import * as sleep from 'sleep';
 import { EventEmitter } from 'events';
 import { VantageInfusionConfig, InterfaceSupportResult } from './types';
 import { XMLParser, XMLBuilder } from 'fast-xml-parser';
+
+// Pure JavaScript sleep function
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 const typeThermo = [
   'Thermostat',
@@ -252,11 +254,11 @@ export class VantageInfusion extends EventEmitter {
     } else {
       const interfaceId = this.interfaces[interfaceName];
 
-      return new Promise((resolve) => {
+      return new Promise(async (resolve) => {
         this.once(sprintf.sprintf('isInterfaceSupportedAnswer-%d-%d', parseInt(item.VID), parseInt(interfaceId.toString())), (support: number) => {
           resolve({ item, interface: interfaceName, support: support === 1 });
         });
-        sleep.usleep(5000);
+        await sleep(5); // 5ms delay instead of 5000 microseconds
         this.command.write(sprintf.sprintf('INVOKE %s Object.IsInterfaceSupported %s\n', item.VID, interfaceId));
       });
     }
