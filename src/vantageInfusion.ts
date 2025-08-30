@@ -2,10 +2,11 @@ import * as net from 'net';
 import * as tls from 'tls';
 import * as fs from 'fs';
 import * as sprintf from 'sprintf-js';
-import * as parser from 'xml2json';
+
 import * as sleep from 'sleep';
 import { EventEmitter } from 'events';
 import { VantageInfusionConfig, InterfaceSupportResult } from './types';
+import { XMLParser, XMLBuilder } from 'fast-xml-parser';
 
 const typeThermo = [
   'Thermostat',
@@ -51,6 +52,8 @@ export class VantageInfusion extends EventEmitter {
   private command: any;
   private interfaces: { [key: string]: number } = {};
   private isInsecure: boolean;
+  private xmlParser: XMLParser;
+  private xmlBuilder: XMLBuilder;
 
   constructor(config: VantageInfusionConfig) {
     super();
@@ -62,6 +65,16 @@ export class VantageInfusion extends EventEmitter {
     this.username = config.username;
     this.password = config.password;
     this.isInsecure = config.isInsecure;
+    
+    // Initialize XML parsers
+    this.xmlParser = new XMLParser({
+      ignoreAttributes: false,
+      attributeNamePrefix: "@_"
+    });
+    this.xmlBuilder = new XMLBuilder({
+      ignoreAttributes: false,
+      attributeNamePrefix: "@_"
+    });
 
     if (this.isInsecure && !useSecure) {
       this.startCommand();
