@@ -3,7 +3,6 @@ import * as tls from 'tls';
 import * as fs from 'fs';
 import * as sprintf from 'sprintf-js';
 import * as parser from 'xml2json';
-import * as libxmljs from 'libxmljs';
 import * as sleep from 'sleep';
 import { EventEmitter } from 'events';
 import { VantageInfusionConfig, InterfaceSupportResult } from './types';
@@ -289,7 +288,7 @@ export class VantageInfusion extends EventEmitter {
               }
             }
           }
-          libxmljs.parseXml(buffer);
+          // libxmljs.parseXml(buffer); // Removed libxmljs
         } catch (e) {
           return false;
         }
@@ -456,7 +455,7 @@ export class VantageInfusion extends EventEmitter {
               }
             }
           }
-          libxmljs.parseXml(buffer);
+          // libxmljs.parseXml(buffer); // Removed libxmljs
         } catch (e) {
           return false;
         }
