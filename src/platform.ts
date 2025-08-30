@@ -1,7 +1,7 @@
 import { API, Logger, PlatformConfig } from 'homebridge';
 import * as net from 'net';
 import * as sprintf from 'sprintf-js';
-import * as parser from 'xml2json';
+import { XMLParser } from 'fast-xml-parser';
 import { VantageInfusion } from './vantageInfusion';
 import { VantageDevice, VantageConfig } from './types';
 
@@ -21,6 +21,7 @@ export class VantagePlatform {
   private ready = false;
   private callbackPromesedAccessories: ((devices: VantageDevice[]) => void) | undefined;
   private infusion: VantageInfusion;
+  private xmlParser: XMLParser;
 
   constructor(log: Logger, config: PlatformConfig, api: API) {
     this.log = log;
@@ -28,6 +29,12 @@ export class VantagePlatform {
     this.api = api;
     this.ipaddress = this.convertToIP(config.ipaddress);
     this.lastDiscovery = null;
+    
+    // Initialize XML parser
+    this.xmlParser = new XMLParser({
+      ignoreAttributes: false,
+      attributeNamePrefix: "@_"
+    });
 
     if (config.usecache === undefined) {
       this.usecache = true;
@@ -264,7 +271,7 @@ export class VantagePlatform {
 
     this.infusion.on('endDownloadConfiguration', (configuration: string) => {
       this.log.debug('VantagePlatform for InFusion Controller (end configuration download)');
-      const parsed = JSON.parse(parser.toJson(configuration));
+      const parsed = this.xmlParser.parse(configuration);
       const dict: { [key: string]: string } = {};
       
       const areas = parsed.Project.Objects.Object.filter((el: any) => {

@@ -312,7 +312,7 @@ export class VantageInfusion extends EventEmitter {
           console.log('parse Json: ' + objectTypes[writeCount] + ' on controller: ' + controller.toString());
         }
 
-        const parsed = JSON.parse(parser.toJson(buffer));
+        const parsed = this.xmlParser.parse(buffer);
         if (parsed.smarterHome !== undefined) {
           if (parsed.smarterHome.IIntrospection !== undefined) {
             const interfaces = parsed.smarterHome.IIntrospection.GetInterfaces.return.Interface;
@@ -377,7 +377,7 @@ export class VantageInfusion extends EventEmitter {
             result['Project']['Objects'] = {};
             result['Project']['Objects']['Object'] = readObjects;
             const options = { sanitize: true };
-            const xmlResult = parser.toXml(result, options);
+            const xmlResult = this.xmlBuilder.build(result);
             fs.writeFileSync('/tmp/vantage.dc', xmlResult);
             this.emit('endDownloadConfiguration', xmlResult);
             configuration.destroy();
@@ -479,7 +479,7 @@ export class VantageInfusion extends EventEmitter {
           console.log('parse Json: ' + objectTypes[writeCount] + ' on controller: ' + controller.toString());
         }
 
-        const parsed = JSON.parse(parser.toJson(buffer));
+        const parsed = this.xmlParser.parse(buffer);
         if (parsed.smarterHome !== undefined) {
           if (parsed.smarterHome.IIntrospection !== undefined) {
             const interfaces = parsed.smarterHome.IIntrospection.GetInterfaces.return.Interface;
@@ -544,7 +544,7 @@ export class VantageInfusion extends EventEmitter {
             result['Project']['Objects'] = {};
             result['Project']['Objects']['Object'] = readObjects;
             const options = { sanitize: true };
-            const xmlResult = parser.toXml(result, options);
+            const xmlResult = this.xmlBuilder.build(result);
             fs.writeFileSync('/tmp/vantage.dc', xmlResult);
             this.emit('endDownloadConfiguration', xmlResult);
             configuration.destroy();
