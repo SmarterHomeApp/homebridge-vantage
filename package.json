@@ -50,5 +50,56 @@
   },
   "homepage": "https://github.com/yourusername/homebridge-vantage#readme",
   "author": "Your Name",
-  "license": "MIT"
+  "license": "MIT",
+  "homebridge": {
+    "pluginAlias": "VantageControls"
+  },
+  "configSchema": {
+    "platform": {
+      "type": "string",
+      "const": "VantageControls",
+      "required": true
+    },
+    "name": {
+      "type": "string",
+      "description": "Name for this Vantage Controls platform",
+      "required": true
+    },
+    "ipaddress": {
+      "type": "string",
+      "description": "IP address of your Vantage InFusion controller",
+      "format": "ipv4",
+      "required": true
+    },
+    "username": {
+      "type": "string",
+      "description": "Username for Vantage controller (leave empty if not required)",
+      "default": ""
+    },
+    "password": {
+      "type": "string",
+      "description": "Password for Vantage controller (leave empty if not required)",
+      "default": ""
+    },
+    "usecache": {
+      "type": "boolean",
+      "description": "Use cached configuration file if available",
+      "default": true
+    },
+    "omit": {
+      "type": "string",
+      "description": "Comma-separated list of Vantage IDs to exclude",
+      "default": ""
+    },
+    "range": {
+      "type": "string",
+      "description": "Range of Vantage IDs to include (e.g., '1,100')",
+      "default": ""
+    },
+    "isInsecure": {
+      "type": "boolean",
+      "description": "Use non-SSL connections (ports 3001/2001 instead of 3010/2010)",
+      "default": true
+    }
+  }
 } 

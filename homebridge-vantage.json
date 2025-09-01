@@ -49,6 +49,13 @@
         "type": "string",
         "required": false,
         "description": "Comma-separated VID range (min,max) to limit discovery"
+      },
+      "isInsecure": {
+        "title": "Use Non-SSL Connections",
+        "type": "boolean",
+        "required": false,
+        "default": true,
+        "description": "Use ports 3001/2001 instead of 3010/2010 (SSL)"
       }
     }
   },
@@ -60,7 +67,8 @@
         "name",
         "ipaddress",
         "username",
-        "password"
+        "password",
+        "isInsecure"
       ]
     },
     {
