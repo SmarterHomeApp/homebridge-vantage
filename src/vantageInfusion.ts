@@ -1,25 +1,20 @@
-import * as net from 'net';
-import * as tls from 'tls';
-import * as fs from 'fs';
-import * as sprintf from 'sprintf-js';
+import { EventEmitter } from 'node:events';
+import * as net from 'node:net';
+import * as tls from 'node:tls';
+import { Parser } from 'xml2js';
+import type { Logger } from 'homebridge';
+import type { VantageDevice } from './types';
 
-import { EventEmitter } from 'events';
-import { VantageInfusionConfig, InterfaceSupportResult } from './types';
-import { XMLParser, XMLBuilder } from 'fast-xml-parser';
-
-// Pure JavaScript sleep function
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-const typeThermo = [
+const TYPE_THERMO = [
   'Thermostat',
   'Vantage.HVAC-Interface_Point_Zone_CHILD',
   'Vantage.VirtualThermostat_PORT',
   'Tekmar.tN4_Gateway_482_Zone_-_Slab_Only_CHILD',
   'Tekmar.tN4_Gateway_482_Zone_CHILD',
-  'Legrand.MH_HVAC_Control_CHILD'
+  'Legrand.MH_HVAC_Control_CHILD',
 ];
 
-const typeBlind = [
+const TYPE_BLIND = [
   'Blind',
   'RelayBlind',
   'QISBlind',
@@ -27,636 +22,627 @@ const typeBlind = [
   'QubeBlind',
   'ESI.RQShadeChannel_CHILD',
   'QMotion.QIS_Channel_CHILD',
-  'Somfy.UAI-RS485-Motor_CHILD'
+  'Somfy.UAI-RS485-Motor_CHILD',
 ];
 
-const objectTypes = [
+const OBJECT_TYPES = [
   'Area',
   'Load',
   'Vantage.DDGColorLoad',
   'Legrand.MH_Relay_CHILD',
   'Legrand.MH_Dimmer_CHILD',
   'Jandy.Aqualink_RS_Pump_CHILD',
-  'Jandy.Aqualink_RS_Auxiliary_CHILD'
-].concat(typeThermo).concat(typeBlind);
+  'Jandy.Aqualink_RS_Auxiliary_CHILD',
+  ...TYPE_THERMO,
+  ...TYPE_BLIND,
+];
 
-const useBackup = false;
-const useSecure = false;
+interface Options {
+  ipaddress: string;
+  username: string;
+  password: string;
+  usecache: boolean;
+  omit: string;
+  range: string;
+  log: Logger;
+  forceSSL?: boolean;
+}
 
 export class VantageInfusion extends EventEmitter {
-  private ipaddress: string;
-  private usecache: boolean;
-  private accessories: any[];
-  private omit: string;
-  private range: string;
-  private username: string;
-  private password: string;
-  private command: any;
-  private interfaces: { [key: string]: number } = {};
-  private isInsecure: boolean;
-  private xmlParser: XMLParser;
-  private xmlBuilder: XMLBuilder;
+  private readonly xml = new Parser({ explicitArray: false, mergeAttrs: true, trim: true });
+  private command!: net.Socket | tls.TLSSocket;
+  private isInsecureCmd = true; // 3001 vs 3010
+  private isInsecureCfg = true; // 2001 vs 2010
 
-  constructor(config: VantageInfusionConfig) {
+  constructor(private readonly opts: Options) {
     super();
-    this.ipaddress = config.ipaddress;
-    this.usecache = config.usecache;
-    this.accessories = config.accessories || [];
-    this.omit = config.omit;
-    this.range = config.range;
-    this.username = config.username;
-    this.password = config.password;
-    this.isInsecure = config.isInsecure;
-    
-    // Initialize XML parsers
-    this.xmlParser = new XMLParser({
-      ignoreAttributes: false,
-      attributeNamePrefix: "@_"
-    });
-    this.xmlBuilder = new XMLBuilder({
-      ignoreAttributes: false,
-      attributeNamePrefix: "@_"
-    });
+  }
 
-    if (this.isInsecure && !useSecure) {
-      this.startCommand();
+  /** Probe ports and open command session */
+  async start() {
+    if (this.opts.forceSSL) {
+      this.isInsecureCmd = false;
+      this.isInsecureCfg = false;
     } else {
-      this.startCommandSSL();
+      this.isInsecureCmd = await this.portUsable(3001, 'STATUS ALL\n');
+      this.isInsecureCfg = await this.portUsable(
+        2001,
+        '<IIntrospection><GetInterfaces><call></call></GetInterfaces></IIntrospection>\n',
+      );
     }
+
+    // Legacy-style port logs
+    this.opts.log.info(this.isInsecureCmd ? 'Using insecure port: 3001' : 'Using SSL port: 3010');
+    this.opts.log.info(this.isInsecureCfg ? 'Using insecure port: 2001' : 'Using SSL port: 2010');
+
+    await this.startCommand();
   }
 
-  private startCommand(): void {
-    this.command = net.connect({ host: this.ipaddress, port: 3001 }, () => {
-      if (this.username !== '' && this.password !== '') {
-        this.command.write(sprintf.sprintf('Login %s %s\n', this.username, this.password));
-      }
-      console.log('connected');
-      this.command.write(sprintf.sprintf('STATUS ALL\n'));
-      this.command.write(sprintf.sprintf('ELENABLE 1 AUTOMATION ON\nELENABLE 1 EVENT ON\nELENABLE 1 STATUS ON\nELENABLE 1 STATUSEX ON\nELENABLE 1 SYSTEM ON\nELLOG AUTOMATION ON\nELLOG EVENT ON\nELLOG STATUS ON\nELLOG STATUSEX ON\nELLOG SYSTEM ON\n'));
-    });
-
-    this.command.on('data', (data: Buffer) => {
-      const lines = data.toString().split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        const dataItem = lines[i].split(' ');
-        try {
-          if (lines[i].startsWith('S:BLIND') || lines[i].startsWith('R:GETBLIND') || (lines[i].startsWith('R:INVOKE') && dataItem[3]?.includes('Blind'))) {
-            this.emit('blindStatusChange', parseInt(dataItem[1]), parseInt(dataItem[2]));
-          }
-          if (lines[i].startsWith('S:LOAD ') || lines[i].startsWith('R:GETLOAD ')) {
-            this.emit('loadStatusChange', parseInt(dataItem[1]), parseInt(dataItem[2]));
-          }
-          if (dataItem[0] === 'R:INVOKE' && dataItem[3]?.includes('RGBLoad.GetHSL')) {
-            this.emit('loadStatusChange', parseInt(dataItem[1]), parseInt(dataItem[2]), parseInt(dataItem[4]));
-          }
-          if (dataItem[0] === 'S:TEMP') {
-            this.emit('thermostatDidChange', parseInt(dataItem[2]));
-          } else if (dataItem[0] === 'R:INVOKE' && dataItem[3]?.includes('Thermostat.GetIndoorTemperature')) {
-            this.emit('thermostatIndoorTemperatureChange', parseInt(dataItem[1]), parseFloat(dataItem[2]));
-          } else if (dataItem[0] === 'S:THERMOP' || dataItem[0] === 'R:GETTHERMOP' || dataItem[0] === 'R:THERMTEMP') {
-            let modeVal = 0;
-            if (dataItem[2]?.includes('OFF')) {
-              modeVal = 0;
-            } else if (dataItem[2]?.includes('HEAT')) {
-              modeVal = 1;
-            } else if (dataItem[2]?.includes('COOL')) {
-              modeVal = 2;
-            } else {
-              modeVal = 3;
-            }
-            if (dataItem[0] === 'S:THERMOP' || dataItem[0] === 'R:GETTHERMOP') {
-              this.emit('thermostatIndoorModeChange', parseInt(dataItem[1]), parseInt(modeVal.toString()), -1);
-            } else {
-              this.emit('thermostatIndoorModeChange', parseInt(dataItem[1]), parseInt(modeVal.toString()), parseFloat(dataItem[3]));
-            }
-          }
-        } catch (error) {
-          console.log('unable to update status');
-        }
-
-        if (lines[i].startsWith('R:INVOKE') && lines[i].indexOf('Object.IsInterfaceSupported')) {
-          this.emit(sprintf.sprintf('isInterfaceSupportedAnswer-%d-%d', parseInt(dataItem[1]), parseInt(dataItem[4])), parseInt(dataItem[2]));
-        }
-      }
-    });
-
-    this.command.on('close', () => {
-      console.log('\n\nPort 3001 has closed!!\n\n');
-      this.reconnect();
-    });
-
-    this.command.on('end', () => {
-      console.log('Port 3001 has ended!!');
-    });
-
-    this.command.on('error', console.error);
-  }
-
-  private reconnect(): void {
-    console.log('Attempting reconnect!');
-    this.command.removeAllListeners();
-    this.command.destroy();
-    setTimeout(() => {
-      if (this.isInsecure && !useSecure) {
-        this.startCommand();
-      } else {
-        this.startCommandSSL();
-      }
-    }, 5000);
-  }
-
-  private startCommandSSL(): void {
-    const options = {
-      rejectUnauthorized: false,
-      requestCert: true
-    };
-
-    const socket = tls.connect(3010, this.ipaddress, options, () => {
-      if (this.username !== '' && this.password !== '') {
-        socket.write(sprintf.sprintf('Login %s %s\n', this.username, this.password));
-      }
-      socket.write(sprintf.sprintf('STATUS ALL\n'));
-      socket.write(sprintf.sprintf('ELENABLE 1 AUTOMATION ON\nELENABLE 1 EVENT ON\nELENABLE 1 STATUS ON\nELENABLE 1 STATUSEX ON\nELENABLE 1 SYSTEM ON\nELLOG AUTOMATION ON\nELLOG EVENT ON\nELLOG STATUS ON\nELLOG STATUSEX ON\nELLOG SYSTEM ON\n'));
-    });
-
-    socket.on('data', (data: Buffer) => {
-      const lines = data.toString().split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        const dataItem = lines[i].split(' ');
-        try {
-          if (lines[i].startsWith('S:BLIND') || lines[i].startsWith('R:GETBLIND') || (lines[i].startsWith('R:INVOKE') && dataItem[3]?.includes('Blind'))) {
-            this.emit('blindStatusChange', parseInt(dataItem[1]), parseInt(dataItem[2]));
-          }
-          if (lines[i].startsWith('S:LOAD ') || lines[i].startsWith('R:GETLOAD ')) {
-            this.emit('loadStatusChange', parseInt(dataItem[1]), parseInt(dataItem[2]));
-          }
-          if (dataItem[0] === 'R:INVOKE' && dataItem[3]?.includes('RGBLoad.GetHSL')) {
-            this.emit('loadStatusChange', parseInt(dataItem[1]), parseInt(dataItem[2]), parseInt(dataItem[4]));
-          }
-          if (dataItem[0] === 'S:TEMP') {
-            this.emit('thermostatDidChange', parseInt(dataItem[2]));
-          } else if (dataItem[0] === 'R:INVOKE' && dataItem[3]?.includes('Thermostat.GetIndoorTemperature')) {
-            this.emit('thermostatIndoorTemperatureChange', parseInt(dataItem[1]), parseFloat(dataItem[2]));
-          } else if (dataItem[0] === 'S:THERMOP' || dataItem[0] === 'R:GETTHERMOP' || dataItem[0] === 'R:THERMTEMP') {
-            let modeVal = 0;
-            if (dataItem[2]?.includes('OFF')) {
-              modeVal = 0;
-            } else if (dataItem[2]?.includes('HEAT')) {
-              modeVal = 1;
-            } else if (dataItem[2]?.includes('COOL')) {
-              modeVal = 2;
-            } else {
-              modeVal = 3;
-            }
-            if (dataItem[0] === 'S:THERMOP' || dataItem[0] === 'R:GETTHERMOP') {
-              this.emit('thermostatIndoorModeChange', parseInt(dataItem[1]), parseInt(modeVal.toString()), -1);
-            } else {
-              this.emit('thermostatIndoorModeChange', parseInt(dataItem[1]), parseInt(modeVal.toString()), parseFloat(dataItem[3]));
-            }
-          }
-        } catch (error) {
-          console.log('unable to update status');
-        }
-
-        if (lines[i].startsWith('R:INVOKE') && lines[i].indexOf('Object.IsInterfaceSupported')) {
-          this.emit(sprintf.sprintf('isInterfaceSupportedAnswer-%d-%d', parseInt(dataItem[1]), parseInt(dataItem[4])), parseInt(dataItem[2]));
-        }
-      }
-    });
-
-    socket.on('close', () => {
-      console.log('\nPort 3010 has closed!!\n');
-      socket.removeAllListeners();
-      socket.destroy();
-      this.reconnect();
-    });
-
-    socket.on('end', () => {
-      console.log('Port 3010 has ended !!');
-    });
-
-    socket.on('error', console.error);
-
-    this.command = socket;
-  }
-
-  public getLoadStatus(vid: string): void {
-    this.command.write(sprintf.sprintf('GETLOAD %s\n', vid));
-  }
-
-  public getLoadHSL(vid: string, val: string): void {
-    this.command.write(sprintf.sprintf('INVOKE %s RGBLoad.GetHSL %s\n', vid, val));
-  }
-
-  public isInterfaceSupported(item: any, interfaceName: string): Promise<InterfaceSupportResult> {
-    if (this.interfaces[interfaceName] === undefined) {
-      return Promise.resolve({ item, interface: interfaceName, support: false });
-    } else {
-      const interfaceId = this.interfaces[interfaceName];
-
-      return new Promise(async (resolve) => {
-        this.once(sprintf.sprintf('isInterfaceSupportedAnswer-%d-%d', parseInt(item.VID), parseInt(interfaceId.toString())), (support: number) => {
-          resolve({ item, interface: interfaceName, support: support === 1 });
-        });
-        await sleep(5); // 5ms delay instead of 5000 microseconds
-        this.command.write(sprintf.sprintf('INVOKE %s Object.IsInterfaceSupported %s\n', item.VID, interfaceId));
+  private portUsable(port: number, probe: string): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let sawData = false;
+      const sock = net.connect({ host: this.opts.ipaddress, port }, () => {
+        sock.write(probe);
       });
-    }
+      sock.setTimeout(5000, () => sock.destroy());
+      sock.once('connect', () => sock.setTimeout(0));
+      sock.on('data', () => {
+        sawData = true;
+        resolve(true);
+        sock.destroy();
+      });
+      sock.on('close', () => {
+        if (!sawData) resolve(false);
+      });
+      sock.on('error', () => {
+        /* resolve on close path */
+      });
+    });
   }
 
-  public discover(): void {
-    const configuration = net.connect({ host: this.ipaddress, port: 2001 }, () => {
-      console.log('load dc file');
+  private async startCommand() {
+    return new Promise<void>((resolve) => {
+      const onConnect = (socket: net.Socket | tls.TLSSocket) => {
+        this.command = socket;
 
-      let buffer = '';
-      let xmlResult = '';
-      const readObjects: any[] = [];
-      let writeCount = 0;
-      const objectDict: { [key: string]: string } = {};
-      let controller = 1;
-      let shouldbreak = false;
+        // Legacy “connected” log
+        this.opts.log.info(this.isInsecureCmd ? 'connected (command) — Port 3001' : 'connected (command) — Port 3010');
 
-      configuration.on('data', (data: Buffer) => {
-        buffer = buffer + data.toString().replace('\ufeff', '');
-
-        try {
-          if (useBackup) {
-            buffer = buffer.replace('<?File Encode="Base64" /', '<File>');
-            buffer = buffer.replace('?>', '</File>');
-
-            if (buffer.includes('</File>')) {
-              console.log('end');
-              const start = buffer.split('<File>');
-              const end = buffer.split('</File>');
-
-              const match = buffer.match('<File>' + '(.*?)' + '</File>');
-              if (match) {
-                buffer = match[1];
-                let newtext = Buffer.from(buffer, 'base64').toString();
-                newtext = newtext.replace(/[\r\n]/g, '');
-                const init = newtext.split('<Objects>');
-                const objMatch = newtext.match('<Objects>' + '(.*?)' + '</Objects>');
-                if (objMatch) {
-                  xmlResult = Buffer.from(init[0] + '<Objects>' + objMatch[1] + '</Objects></Project>').toString('base64');
-                  buffer = '<smarterHome>' + start[0] + '<File>' + xmlResult + '</File>' + end[end.length - 1] + '</smarterHome>';
-                }
-              }
-            }
-          }
-          // libxmljs.parseXml(buffer); // Removed libxmljs
-        } catch (e) {
-          return false;
+        if (this.opts.username && this.opts.password) {
+          this.command.write(`Login ${this.opts.username} ${this.opts.password}\n`);
         }
+        this.command.write('STATUS ALL\n');
+        this.command.write(
+          'ELENABLE 1 AUTOMATION ON\n' +
+            'ELENABLE 1 EVENT ON\n' +
+            'ELENABLE 1 STATUS ON\n' +
+            'ELENABLE 1 STATUSEX ON\n' +
+            'ELENABLE 1 SYSTEM ON\n' +
+            'ELLOG AUTOMATION ON\n' +
+            'ELLOG EVENT ON\n' +
+            'ELLOG STATUS ON\n' +
+            'ELLOG STATUSEX ON\n' +
+            'ELLOG SYSTEM ON\n',
+        );
+        resolve();
+      };
 
-        if (writeCount < objectTypes.length) {
-          console.log('parse Json: ' + objectTypes[writeCount] + ' on controller: ' + controller.toString());
-        }
-
-        const parsed = this.xmlParser.parse(buffer);
-        if (parsed.smarterHome !== undefined) {
-          if (parsed.smarterHome.IIntrospection !== undefined) {
-            const interfaces = parsed.smarterHome.IIntrospection.GetInterfaces.return.Interface;
-            for (let i = 0; i < interfaces.length; i++) {
-              this.interfaces[interfaces[i].Name] = interfaces[i].IID;
-            }
-          }
-          if (parsed.smarterHome.IBackup !== undefined) {
-            const xmlconfiguration = Buffer.from(parsed.smarterHome.IBackup.GetFile.return.File, 'base64').toString('ascii');
-            fs.writeFileSync('/tmp/vantage.dc', xmlconfiguration);
-            this.emit('endDownloadConfiguration', xmlconfiguration);
-            configuration.destroy();
-          }
-        } else if (parsed.IConfiguration !== undefined) {
-          if (parsed.IConfiguration.OpenFilter !== undefined) {
-            if (!buffer.includes('<?Master ' + controller.toString() + '?>')) {
-              if (controller === 1) {
-                const tmpStr = buffer.slice(9);
-                const res = tmpStr.split('?');
-                controller = parseInt(res[0]);
-              } else {
-                shouldbreak = true;
-              }
-            }
-            const objectValue = parsed.IConfiguration.OpenFilter.return;
-            if (objectDict[objectValue] === undefined && !shouldbreak) {
-              buffer = '';
-              objectDict[objectValue] = objectValue;
-              writeCount++;
-              configuration.write('<IConfiguration><GetFilterResults><call><Count>1000</Count><WholeObject>true</WholeObject><hFilter>' + objectValue + '</hFilter></call></GetFilterResults></IConfiguration>\n');
-            }
-          } else if (parsed.IConfiguration.GetFilterResults !== undefined) {
-            const elements = parsed.IConfiguration.GetFilterResults.return.Object;
-            if (elements !== undefined && !shouldbreak) {
-              if (elements.length === undefined) {
-                const element = elements[objectTypes[writeCount - 1]];
-                element['ObjectType'] = objectTypes[writeCount - 1];
-                const elemDict: { [key: string]: any } = {};
-                elemDict[objectTypes[writeCount - 1]] = element;
-                readObjects.push(elemDict);
-              } else {
-                for (let i = 0; i < elements.length; i++) {
-                  const element = elements[i][objectTypes[writeCount - 1]];
-                  element['ObjectType'] = objectTypes[writeCount - 1];
-                  const elemDict: { [key: string]: any } = {};
-                  elemDict[objectTypes[writeCount - 1]] = element;
-                  readObjects.push(elemDict);
-                }
-              }
-            }
-
-            buffer = '';
-            if (writeCount >= objectTypes.length) {
-              controller++;
-              writeCount = 0;
-            }
-            configuration.write('<?Master ' + controller.toString() + '?><IConfiguration><OpenFilter><call><Objects><ObjectType>' + objectTypes[writeCount] + '</ObjectType></Objects></call></OpenFilter></IConfiguration>\n');
-          }
-          if (shouldbreak) {
-            const result: any = {};
-            result['Project'] = {};
-            result['Project']['Objects'] = {};
-            result['Project']['Objects']['Object'] = readObjects;
-            const options = { sanitize: true };
-            const xmlResult = this.xmlBuilder.build(result);
-            fs.writeFileSync('/tmp/vantage.dc', xmlResult);
-            this.emit('endDownloadConfiguration', xmlResult);
-            configuration.destroy();
-          }
-        } else if (parsed.ILogin !== undefined) {
-          if (parsed.ILogin.Login !== undefined) {
-            if (parsed.ILogin.Login.return === 'true') {
-              console.log('Login successful');
-            } else {
-              console.log('Login failed trying to get data anyways');
-            }
-            buffer = '';
-            if (useBackup) {
-              configuration.write('<IBackup><GetFile><call>Backup\\Project.dc</call></GetFile></IBackup>\n');
-            } else {
-              configuration.write('<?Master ' + controller.toString() + '?><IConfiguration><OpenFilter><call><Objects><ObjectType>' + objectTypes[0] + '</ObjectType></Objects></call></OpenFilter></IConfiguration>\n');
-            }
-          }
-        }
-        buffer = '';
-      });
-
-      if (fs.existsSync('/tmp/vantage.dc') && this.usecache) {
-        fs.readFile('/tmp/vantage.dc', 'utf8', (err, data) => {
-          if (!err) {
-            this.emit('endDownloadConfiguration', data);
-          }
-        });
-      } else if (fs.existsSync('/home/pi/vantage.dc') && this.usecache) {
-        fs.readFile('/home/pi/vantage.dc', 'utf8', (err, data) => {
-          if (!err) {
-            this.emit('endDownloadConfiguration', data);
-          }
-        });
+      if (this.isInsecureCmd) {
+        const sock = net.connect({ host: this.opts.ipaddress, port: 3001 }, () => onConnect(sock));
+        this.wireCommandSocket(sock);
       } else {
-        if (this.username !== '' && this.password !== '') {
-          configuration.write('<ILogin><Login><call><User>' + this.username + '</User><Password>' + this.password + '</Password></call></Login></ILogin>\n');
-        } else {
-          if (useBackup) {
-            configuration.write('<IBackup><GetFile><call>Backup\\Project.dc</call></GetFile></IBackup>\n');
+        const sock = tls.connect(
+          3010,
+          this.opts.ipaddress,
+          { rejectUnauthorized: false, requestCert: true },
+          () => onConnect(sock),
+        );
+        this.wireCommandSocket(sock);
+      }
+    });
+  }
+
+  private wireCommandSocket(sock: net.Socket | tls.TLSSocket) {
+    sock.on('data', (data) => this.parseRealtime(String(data)));
+    sock.on('close', () => {
+      // Legacy “Port … has closed!!” lines
+      this.opts.log.warn(this.isInsecureCmd ? '\n\nPort 3001 has closed!!\n\n' : '\n\nPort 3010 has closed!!\n\n');
+      this.opts.log.warn('Command port closed – reconnecting in 5s');
+      setTimeout(() => this.startCommand(), 5000);
+    });
+    sock.on('end', () => {
+      // Legacy “Port … has ended!!”
+      this.opts.log.warn(this.isInsecureCmd ? 'Port 3001 has ended!!' : 'Port 3010 has ended!!');
+    });
+    sock.on('error', (e) => this.opts.log.debug(`Command socket error: ${String(e)}`));
+  }
+
+  private parseRealtime(buffer: string) {
+    const lines = buffer.split('\n');
+    for (const line of lines) {
+      if (!line) continue;
+      const dataItem = line.split(' ');
+      try {
+        if (
+          line.startsWith('S:BLIND') ||
+          line.startsWith('R:GETBLIND') ||
+          (line.startsWith('R:INVOKE') && (dataItem[3] || '').includes('Blind'))
+        ) {
+          this.emit('blindStatusChange', Number.parseInt(dataItem[1]), Number.parseInt(dataItem[2]));
+        }
+        if (line.startsWith('S:LOAD ') || line.startsWith('R:GETLOAD ')) {
+          this.emit('loadStatusChange', Number.parseInt(dataItem[1]), Number.parseInt(dataItem[2]));
+        }
+        if (dataItem[0] === 'R:INVOKE' && (dataItem[3] || '').includes('RGBLoad.GetHSL')) {
+          this.emit('loadStatusChange', Number.parseInt(dataItem[1]), Number.parseInt(dataItem[2]), Number.parseInt(dataItem[4]));
+        }
+        if (dataItem[0] === 'S:TEMP') {
+          this.emit('thermostatDidChange', Number.parseInt(dataItem[2]));
+        } else if (dataItem[0] === 'R:INVOKE' && (dataItem[3] || '').includes('Thermostat.GetIndoorTemperature')) {
+          this.emit('thermostatIndoorTemperatureChange', Number.parseInt(dataItem[1]), Number.parseFloat(dataItem[2]));
+        } else if (dataItem[0] === 'S:THERMOP' || dataItem[0] === 'R:GETTHERMOP' || dataItem[0] === 'R:THERMTEMP') {
+          let modeVal = 0;
+          const token = dataItem[2] || '';
+          if (token.includes('OFF')) modeVal = 0;
+          else if (token.includes('HEAT')) modeVal = 1;
+          else if (token.includes('COOL')) modeVal = 2;
+          else modeVal = 3;
+
+          if (dataItem[0] === 'S:THERMOP' || dataItem[0] === 'R:GETTHERMOP') {
+            this.emit('thermostatIndoorModeChange', Number.parseInt(dataItem[1]), modeVal, -1);
           } else {
-            configuration.write('<?Master ' + controller.toString() + '?><IConfiguration><OpenFilter><call><Objects><ObjectType>' + objectTypes[0] + '</ObjectType></Objects></call></OpenFilter></IConfiguration>\n');
+            this.emit(
+              'thermostatIndoorModeChange',
+              Number.parseInt(dataItem[1]),
+              modeVal,
+              Number.parseFloat(dataItem[3]),
+            );
           }
         }
+        if (line.startsWith('R:INVOKE') && line.indexOf('Object.IsInterfaceSupported') >= 0) {
+          this.emit(
+            `isInterfaceSupportedAnswer-${Number.parseInt(dataItem[1])}-${Number.parseInt(dataItem[4])}`,
+            Number.parseInt(dataItem[2]),
+          );
+        }
+      } catch {
+        this.opts.log.debug('Realtime parse error for line: ' + line);
       }
-    });
+    }
   }
 
-  public discoverSSL(): void {
-    const options = {
-      rejectUnauthorized: false,
-      requestCert: true
-    };
+  private sanitizeXml(xml: string): string {
+    // 1. Escape bare ampersands that are not part of an entity
+    xml = xml.replace(/&(?!(?:amp|lt|gt|apos|quot);)/g, "&amp;");
 
-    const configuration = tls.connect(2010, this.ipaddress, options, () => {
-      console.log('load dc file');
+    // 2. Example: fix <Area>16</Area> nested inside <Area>...</Area>
+    //    by renaming the inner tag. Adjust this regex to your schema.
+    xml = xml.replace(/<Area>(\d+)<\/Area>/g, "<AreaID>$1</AreaID>");
+  
+    return xml;
+  }
+  /** XML/config discovery; returns devices (replaces old Discover/DiscoverSSL) */
+  async discoverDevices(): Promise<VantageDevice[]> {
+    const xml = await this.pullConfigurationXml();
+    // Legacy: “end configuration download”
+    this.opts.log.debug('VantagePlatform for InFusion Controller (end configuration download)');
 
-      let buffer = '';
-      let xmlResult = '';
-      const readObjects: any[] = [];
-      let writeCount = 0;
-      const objectDict: { [key: string]: string } = {};
-      let controller = 1;
-      let shouldbreak = false;
+    const sanitized = this.sanitizeXml(xml);
+    const parsed = await this.xml.parseStringPromise(sanitized).catch(() => ({} as any));
+    const devices: VantageDevice[] = [];
 
-      configuration.on('data', (data: Buffer) => {
-        buffer = buffer + data.toString().replace('\ufeff', '');
+    const objects: any[] = parsed?.Project?.Objects?.Object || [];
 
-        try {
-          if (useBackup) {
-            buffer = buffer.replace('<?File Encode="Base64" /', '<File>');
-            buffer = buffer.replace('?>', '</File>');
+    const Areas = objects.filter((el: any) => Object.keys(el)[0] === 'Area');
+    const Area: Record<string, any> = {};
+    for (const a of Areas) Area[a.Area.VID] = a.Area;
 
-            if (buffer.includes('</File>')) {
-              console.log('end');
-              const start = buffer.split('<File>');
-              const end = buffer.split('</File>');
+    const omit = (this.opts.omit || '').replace(/\s+/g, '');
+    const omitSet = new Set<string>(omit ? omit.split(',') : []);
 
-              const match = buffer.match('<File>' + '(.*?)' + '</File>');
-              if (match) {
-                buffer = match[1];
-                let newtext = Buffer.from(buffer, 'base64').toString();
-                newtext = newtext.replace(/[\r\n]/g, '');
-                const init = newtext.split('<Objects>');
-                const objMatch = newtext.match('<Objects>' + '(.*?)' + '</Objects>');
-                if (objMatch) {
-                  xmlResult = Buffer.from(init[0] + '<Objects>' + objMatch[1] + '</Objects></Project>').toString('base64');
-                  buffer = '<smarterHome>' + start[0] + '<File>' + xmlResult + '</File>' + end[end.length - 1] + '</smarterHome>';
-                }
-              }
-            }
-          }
-          // libxmljs.parseXml(buffer); // Removed libxmljs
-        } catch (e) {
-          return false;
-        }
+    const rangeStr = (this.opts.range || '0,999999999').replace(/\s+/g, '');
+    const [minVID, maxVID] = rangeStr.split(',').map((x) => Number.parseInt(x, 10));
 
-        if (writeCount < objectTypes.length) {
-          console.log('parse Json: ' + objectTypes[writeCount] + ' on controller: ' + controller.toString());
-        }
+    const blindOpenClose: Record<string, string> = {};
 
-        const parsed = this.xmlParser.parse(buffer);
-        if (parsed.smarterHome !== undefined) {
-          if (parsed.smarterHome.IIntrospection !== undefined) {
-            const interfaces = parsed.smarterHome.IIntrospection.GetInterfaces.return.Interface;
-            for (let i = 0; i < interfaces.length; i++) {
-              this.interfaces[interfaces[i].Name] = interfaces[i].IID;
-            }
-          }
-          if (parsed.smarterHome.IBackup !== undefined) {
-            const xmlconfiguration = Buffer.from(parsed.smarterHome.IBackup.GetFile.return.File, 'base64').toString('ascii');
-            fs.writeFileSync('/tmp/vantage.dc', xmlconfiguration);
-            this.emit('endDownloadConfiguration', xmlconfiguration);
-            configuration.destroy();
-          }
-        } else if (parsed.IConfiguration !== undefined) {
-          if (parsed.IConfiguration.OpenFilter !== undefined) {
-            if (!buffer.includes('<?Master ' + controller.toString() + '?>')) {
-              if (controller === 1) {
-                const tmpStr = buffer.slice(9);
-                const res = tmpStr.split('?');
-                controller = parseInt(res[0]);
-              } else {
-                shouldbreak = true;
-              }
-            }
-            const objectValue = parsed.IConfiguration.OpenFilter.return;
-            if (objectDict[objectValue] === undefined && !shouldbreak) {
-              buffer = '';
-              objectDict[objectValue] = objectValue;
-              writeCount++;
-              configuration.write('<IConfiguration><GetFilterResults><call><Count>1000</Count><WholeObject>true</WholeObject><hFilter>' + objectValue + '</hFilter></call></GetFilterResults></IConfiguration>\n');
-            }
-          } else if (parsed.IConfiguration.GetFilterResults !== undefined) {
-            const elements = parsed.IConfiguration.GetFilterResults.return.Object;
-            if (elements !== undefined && !shouldbreak) {
-              if (elements.length === undefined) {
-                const element = elements[objectTypes[writeCount - 1]];
-                element['ObjectType'] = objectTypes[writeCount - 1];
-                const elemDict: { [key: string]: any } = {};
-                elemDict[objectTypes[writeCount - 1]] = element;
-                readObjects.push(elemDict);
-              } else {
-                for (let i = 0; i < elements.length; i++) {
-                  const element = elements[i][objectTypes[writeCount - 1]];
-                  element['ObjectType'] = objectTypes[writeCount - 1];
-                  const elemDict: { [key: string]: any } = {};
-                  elemDict[objectTypes[writeCount - 1]] = element;
-                  readObjects.push(elemDict);
-                }
-              }
-            }
+    for (const raw of objects) {
+      const key = Object.keys(raw)[0];
+      const it = raw[key];
+      const vid = String(it.VID);
 
-            buffer = '';
-            if (writeCount >= objectTypes.length) {
-              controller++;
-              writeCount = 0;
-            }
-            configuration.write('<?Master ' + controller.toString() + '?><IConfiguration><OpenFilter><call><Objects><ObjectType>' + objectTypes[writeCount] + '</ObjectType></Objects></call></OpenFilter></IConfiguration>\n');
-          }
-          if (shouldbreak) {
-            const result: any = {};
-            result['Project'] = {};
-            result['Project']['Objects'] = {};
-            result['Project']['Objects']['Object'] = readObjects;
-            const options = { sanitize: true };
-            const xmlResult = this.xmlBuilder.build(result);
-            fs.writeFileSync('/tmp/vantage.dc', xmlResult);
-            this.emit('endDownloadConfiguration', xmlResult);
-            configuration.destroy();
-          }
-        } else if (parsed.ILogin !== undefined) {
-          if (parsed.ILogin.Login !== undefined) {
-            if (parsed.ILogin.Login.return === 'true') {
-              console.log('Login successful');
-            } else {
-              console.log('Login failed trying to get data anyways');
-            }
-            buffer = '';
-            if (useBackup) {
-              configuration.write('<IBackup><GetFile><call>Backup\\Project.dc</call></GetFile></IBackup>\n');
-            } else {
-              configuration.write('<?Master ' + controller.toString() + '?><IConfiguration><OpenFilter><call><Objects><ObjectType>' + objectTypes[0] + '</ObjectType></Objects></call></OpenFilter></IConfiguration>\n');
-            }
-          }
-        }
-        buffer = '';
-      });
+      if (omitSet.has(vid)) continue;
+      const vidNum = Number.parseInt(vid, 10);
+      if (!(vidNum >= minVID && vidNum <= maxVID)) continue;
+      if (!OBJECT_TYPES.includes(it.ObjectType)) continue;
 
-      if (fs.existsSync('/tmp/vantage.dc') && this.usecache) {
-        fs.readFile('/tmp/vantage.dc', 'utf8', (err, data) => {
-          if (!err) {
-            this.emit('endDownloadConfiguration', data);
-          }
+      // Normalized name (Area + Name, dedup with VID suffix)
+      let name: string = String(it.DName || it.Name || '');
+      if (it.Area && Area[it.Area]?.Name) name = `${Area[it.Area].Name} ${name}`;
+      name = name.replace(/-/g, '') || `VID${vid}`;
+
+      const pushUnique = (dev: VantageDevice) => {
+        if (devices.find((d) => d.vid === vid)) return;
+        devices.push(dev);
+      };
+
+      if (it.DeviceCategory === 'HVAC' || TYPE_THERMO.includes(it.ObjectType)) {
+        pushUnique({
+          name,
+          address: vid,
+          type: 'thermostat',
+          vid,
+          objectType: it.ObjectType,
+          temperature: 0,
+          targetTemp: 0,
+          heating: 0,
+          cooling: 0,
+          mode: 0,
+          current: 0,
+          units: 1,
         });
-      } else if (fs.existsSync('/home/pi/vantage.dc') && this.usecache) {
-        fs.readFile('/home/pi/vantage.dc', 'utf8', (err, data) => {
-          if (!err) {
-            this.emit('endDownloadConfiguration', data);
-          }
-        });
-      } else {
-        if (this.username !== '' && this.password !== '') {
-          configuration.write('<ILogin><Login><call><User>' + this.username + '</User><Password>' + this.password + '</Password></call></Login></ILogin>\n');
+        continue;
+      }
+
+      if (
+        key === 'Load' ||
+        it.ObjectType === 'Load' ||
+        it.ObjectType === 'Legrand.MH_Dimmer_CHILD' ||
+        it.ObjectType === 'Legrand.MH_Relay_CHILD' ||
+        it.ObjectType === 'Vantage.DDGColorLoad' ||
+        it.ObjectType === 'Jandy.Aqualink_RS_Auxiliary_CHILD' ||
+        it.ObjectType === 'Jandy.Aqualink_RS_Pump_CHILD'
+      ) {
+        const isRelay =
+          it.ObjectType === 'Jandy.Aqualink_RS_Pump_CHILD' ||
+          it.ObjectType === 'Jandy.Aqualink_RS_Auxiliary_CHILD' ||
+          it.ObjectType === 'Legrand.MH_Relay_CHILD' ||
+          it.LoadType === 'Fluor. Mag non-Dim' ||
+          it.LoadType === 'LED non-Dim' ||
+          it.LoadType === 'Fluor. Electronic non-Dim' ||
+          it.LoadType === 'Low Voltage Relay' ||
+          it.LoadType === 'Motor' ||
+          it.LoadType === 'High Voltage Relay';
+
+        if (isRelay) {
+          this.opts.log.info(`New relay added (VID=${it.VID}, Name=${it.Name}, RELAY)`);
+          pushUnique({
+            name,
+            address: vid,
+            type: 'relay',
+            vid,
+            objectType: it.ObjectType,
+            loadType: it.LoadType,
+            bri: 100,
+            power: false,
+          });
+        } else if (it.ObjectType === 'Vantage.DDGColorLoad') {
+          this.opts.log.info(`New load added (VID=${it.VID}, Name=${it.Name}, RGB)`);
+          pushUnique({
+            name,
+            address: vid,
+            type: 'rgb',
+            vid,
+            objectType: it.ObjectType,
+            loadType: it.LoadType,
+            bri: 100,
+            power: false,
+            sat: 0,
+            hue: 0,
+          });
         } else {
-          if (useBackup) {
-            configuration.write('<IBackup><GetFile><call>Backup\\Project.dc</call></GetFile></IBackup>\n');
-          } else {
-            configuration.write('<?Master ' + controller.toString() + '?><IConfiguration><OpenFilter><call><Objects><ObjectType>' + objectTypes[0] + '</ObjectType></Objects></call></OpenFilter></IConfiguration>\n');
-          }
+          this.opts.log.info(`New load added (VID=${it.VID}, Name=${it.Name}, DIMMER)`);
+          pushUnique({
+            name,
+            address: vid,
+            type: 'dimmer',
+            vid,
+            objectType: it.ObjectType,
+            loadType: it.LoadType,
+            bri: 100,
+            power: false,
+          });
         }
+        continue;
+      }
+
+      if (TYPE_BLIND.includes(it.ObjectType)) {
+        if (it.ObjectType === 'RelayBlind') {
+          blindOpenClose[it.OpenLoad] = it.OpenLoad;
+          blindOpenClose[it.CloseLoad] = it.CloseLoad;
+        }
+        this.opts.log.info(`New Blind added (VID=${it.VID}, Name=${it.Name}, BLIND)`);
+        pushUnique({ name, address: vid, type: 'blind', vid, objectType: it.ObjectType, pos: 100, posState: 2 });
+        continue;
+      }
+    }
+
+    // Drop synthetic relay children of RelayBlind
+    const filtered = devices.filter((d) => !blindOpenClose[d.address]);
+
+    // Legacy “Found %f devices”
+    this.opts.log.info(`Found ${filtered.length} devices`);
+
+    if (filtered.length >= 150) {
+      // Legacy Apple limit line
+      this.opts.log.warn(
+        'Number of devices exceeds Apples limit of 149. Only loading first 149 devices. Please omit some loads',
+      );
+      filtered.splice(149);
+    }
+
+    return filtered;
+  }
+
+  private pullConfigurationXml(): Promise<string> {
+    return new Promise<string>((resolve) => {
+      const finishOnce = (socket: net.Socket | tls.TLSSocket, xml: string) => {
+        if ((finishOnce as any)._done) return;
+        (finishOnce as any)._done = true;
+  
+        // legacy log + event
+        this.opts.log.debug('VantagePlatform for InFusion Controller (end configuration download)');
+        this.emit('endDownloadConfiguration', xml);
+  
+        try { socket.destroy(); } catch { /* noop */ }
+        resolve(xml);
+      };
+  
+      const onData = (socket: net.Socket | tls.TLSSocket) => {
+        this.opts.log.info('load dc file'); // legacy
+  
+        let buffer = '';
+        let controller = 1;
+        let shouldBreak = false;
+        const readObjects: any[] = [];
+        const objectDict: Record<string, string> = {};
+        let writeCount = 0;
+  
+        // progress watchdog: if we stop seeing new parsable states, finish with what we have
+        let lastProgress = Date.now();
+        const progress = () => { lastProgress = Date.now(); };
+        const watchdog = setInterval(() => {
+          if ((finishOnce as any)._done) { clearInterval(watchdog); return; }
+          if (readObjects.length && Date.now() - lastProgress > 2000) {
+            // Build minimal XML with what we gathered
+            const xml =
+              '<Project><Objects>' +
+              readObjects.map((o) => {
+                const k = Object.keys(o)[0];
+                const v = o[k];
+                const body = Object.keys(v).map((kk) => `<${kk}>${String(v[kk])}</${kk}>`).join('');
+                return `<Object><${k}>${body}</${k}></Object>`;
+              }).join('') +
+              '</Objects></Project>';
+            clearInterval(watchdog);
+            finishOnce(socket, xml);
+          }
+        }, 750);
+  
+        const writeOpenFilter = () => {
+          const type = OBJECT_TYPES[writeCount] ?? OBJECT_TYPES[0];
+          this.opts.log.info(`parse Json: ${type} on controller: ${controller.toString()}`); // legacy text, visible
+          socket.write(
+            `<?Master ${controller}?>` +
+            `<IConfiguration><OpenFilter><call><Objects><ObjectType>${type}</ObjectType></Objects></call></OpenFilter></IConfiguration>\n`,
+          );
+          progress();
+        };
+  
+        // Kickoff (+ fallback if login never parses)
+        let loginFallback: NodeJS.Timeout | null = null;
+        const clearLoginFallback = () => { if (loginFallback) { clearTimeout(loginFallback); loginFallback = null; } };
+  
+        if (this.opts.username && this.opts.password) {
+          this.opts.log.info('Kickoff: sending <ILogin>');
+          socket.write(
+            `<ILogin><Login><call><User>${this.opts.username}</User><Password>${this.opts.password}</Password></call></Login></ILogin>\n`,
+          );
+          progress();
+          loginFallback = setTimeout(() => {
+            this.opts.log.warn('Login response timeout — calling writeOpenFilter() anyway');
+            writeOpenFilter();
+          }, 2500);
+        } else {
+          this.opts.log.info('Kickoff: writeOpenFilter() (no login)');
+          writeOpenFilter();
+        }
+  
+        socket.on('data', (chunk) => {
+          buffer += String(chunk).replace('\ufeff', '');
+  
+          this.xml.parseString(buffer, (err, parsedAny: any) => {
+            if (err) return; // wait for more chunks
+  
+            const parsed = parsedAny?.smarterHome ?? parsedAny;
+  
+            // ----- LOGIN -----
+            if (parsed?.ILogin?.Login) {
+              const ok = String(parsed.ILogin.Login.return) === 'true';
+              if (ok) this.opts.log.info('Login successful');
+              else this.opts.log.warn('Login failed trying to get data anyways');
+              buffer = '';
+              clearLoginFallback();
+              writeOpenFilter();
+              return;
+            }
+  
+            // ----- OPEN FILTER (handle) -----
+            if (parsed?.IConfiguration?.OpenFilter?.return) {
+              if (!buffer.includes(`<?Master ${controller}?>`)) {
+                if (controller === 1) {
+                  try {
+                    const tmpStr = buffer.slice(9);
+                    const res = tmpStr.split('?');
+                    controller = Number.parseInt(res[0], 10);
+                  } catch { /* ignore */ }
+                } else {
+                  shouldBreak = true;
+                }
+              }
+              const hFilter = parsed.IConfiguration.OpenFilter.return;
+              if (!objectDict[hFilter] && !shouldBreak) {
+                buffer = '';
+                objectDict[hFilter] = hFilter;
+                writeCount++;
+                socket.write(
+                  `<IConfiguration><GetFilterResults><call><Count>1000</Count><WholeObject>true</WholeObject><hFilter>${hFilter}</hFilter></call></GetFilterResults></IConfiguration>\n`,
+                );
+                progress();
+              }
+              return;
+            }
+  
+            // ----- GET FILTER RESULTS -----
+            if (parsed?.IConfiguration?.GetFilterResults?.return?.Object) {
+              const elements = parsed.IConfiguration.GetFilterResults.return.Object;
+              const list = Array.isArray(elements) ? elements : [elements];
+  
+              for (const el of list) {
+                const type = OBJECT_TYPES[writeCount - 1];
+                const item = el[type] ?? el; // tolerate firmwares that return without type wrapper
+                if (item) item.ObjectType = type;
+                const elemDict: any = {};
+                elemDict[type] = item;
+                readObjects.push(elemDict);
+              }
+  
+              buffer = '';
+              if (writeCount >= OBJECT_TYPES.length) {
+                controller++;
+                writeCount = 0;
+              }
+              writeOpenFilter();
+              return;
+            }
+  
+            // ----- END CONDITION -----
+            if (shouldBreak) {
+              const xml =
+                '<Project><Objects>' +
+                readObjects.map((o) => {
+                  const k = Object.keys(o)[0];
+                  const v = o[k];
+                  const body = Object.keys(v).map((kk) => `<${kk}>${String(v[kk])}</${kk}>`).join('');
+                  return `<Object><${k}>${body}</${k}></Object>`;
+                }).join('') +
+                '</Objects></Project>';
+  
+              clearLoginFallback();
+              clearInterval(watchdog);
+              finishOnce(socket, xml);
+            }
+          });
+        });
+  
+        socket.on('end', () => {
+          if (!(finishOnce as any)._done && readObjects.length) {
+            const xml =
+              '<Project><Objects>' +
+              readObjects.map((o) => {
+                const k = Object.keys(o)[0];
+                const v = o[k];
+                const body = Object.keys(v).map((kk) => `<${kk}>${String(v[kk])}</${kk}>`).join('');
+                return `<Object><${k}>${body}</${k}></Object>`;
+              }).join('') +
+              '</Objects></Project>';
+            clearLoginFallback();
+            clearInterval(watchdog);
+            finishOnce(socket, xml);
+          }
+        });
+  
+        socket.on('close', () => {
+          if (!(finishOnce as any)._done && readObjects.length) {
+            const xml =
+              '<Project><Objects>' +
+              readObjects.map((o) => {
+                const k = Object.keys(o)[0];
+                const v = o[k];
+                const body = Object.keys(v).map((kk) => `<${kk}>${String(v[kk])}</${kk}>`).join('');
+                return `<Object><${k}>${body}</${k}></Object>`;
+              }).join('') +
+              '</Objects></Project>';
+            clearLoginFallback();
+            clearInterval(watchdog);
+            finishOnce(socket, xml);
+          }
+        });
+      };
+  
+      if (this.isInsecureCfg) {
+        const s = net.connect({ host: this.opts.ipaddress, port: 2001 }, () => onData(s));
+      } else {
+        const s = tls.connect(
+          2010,
+          this.opts.ipaddress,
+          { rejectUnauthorized: false, requestCert: true },
+          () => onData(s),
+        );
       }
     });
   }
+  
+  
 
-  public RGBLoad_DissolveHSL(vid: string, h: number, s: number, l: number): void {
-    this.command.write(sprintf.sprintf('INVOKE %s RGBLoad.SetHSL %s %s %s %s\n', vid, h, s, l));
+  // ===== Commands used by platformAccessory handlers =====
+
+  async setRelayOrDim(vid: string, on: boolean, bri: number, type: VantageDevice['type']) {
+    if (type === 'relay') return this.setRelay(vid, on);
+    const level = on ? Math.max(1, Number(bri)) : 0;
+    // Ramp (duration=1) to desired level (matches legacy Load.Ramp usage)
+    this.command.write(`INVOKE ${vid} Load.Ramp 6 1 ${level}\n`);
   }
 
-  public Thermostat_GetOutdoorTemperature(vid: string): void {
-    this.command.write(sprintf.sprintf('INVOKE %s Thermostat.GetOutdoorTemperature\n', vid));
+  async setBrightness(vid: string, level: number) {
+    const lvl = Math.max(0, Math.min(100, Number(level)));
+    this.command.write(`INVOKE ${vid} Load.Ramp 6 1 ${lvl}\n`);
   }
 
-  public Thermostat_GetIndoorTemperature(vid: string): void {
-    this.command.write(sprintf.sprintf('INVOKE %s Thermostat.GetIndoorTemperature\n', vid));
+  async setHue(vid: string, hue: number) {
+    // Note: Full HSL write typically needs current S/L. The platform also updates Saturation/Brightness shortly after.
+    this.command.write(`INVOKE ${vid} RGBLoad.SetHSL ${Math.round(hue)} 100 100\n`);
   }
 
-  public Thermostat_SetTargetState(vid: string, mode: number): void {
-    if (mode === 0) {
-      this.command.write(sprintf.sprintf('THERMOP %s OFF\n', vid));
-    } else if (mode === 1) {
-      this.command.write(sprintf.sprintf('THERMOP %s HEAT\n', vid));
-    } else if (mode === 2) {
-      this.command.write(sprintf.sprintf('THERMOP %s COOL\n', vid));
-    } else {
-      this.command.write(sprintf.sprintf('THERMOP %s AUTO\n', vid));
-    }
+  async setSaturation(vid: string, sat: number) {
+    // Similarly, send a best-effort write; brightness updates are handled by setBrightness
+    this.command.write(`INVOKE ${vid} RGBLoad.SetHSL 0 ${Math.round(sat)} 100\n`);
   }
 
-  public Thermostat_GetState(vid: string): void {
-    this.command.write(sprintf.sprintf('GETTHERMOP %s\n', vid));
+  async setRelay(vid: string, on: boolean) {
+    const level = on ? 100 : 0;
+    this.command.write(`LOAD ${vid} ${level}\n`);
   }
 
-  public Thermostat_GetHeating(vid: string): void {
-    this.command.write(sprintf.sprintf('GETTHERMTEMP %s HEAT\n', vid));
+  async setBlindPosition(vid: string, pos: number) {
+    this.command.write(`BLIND ${vid} POS ${Math.max(0, Math.min(100, Math.round(pos)))}\n`);
   }
 
-  public Thermostat_GetCooling(vid: string): void {
-    this.command.write(sprintf.sprintf('GETTHERMTEMP %s COOL\n', vid));
+  refreshThermostat(vid: string) {
+    this.command.write(`INVOKE ${vid} Thermostat.GetIndoorTemperature\n`);
+    this.command.write(`GETTHERMOP ${vid}\n`);
+    this.command.write(`GETTHERMTEMP ${vid} HEAT\n`);
+    this.command.write(`GETTHERMTEMP ${vid} COOL\n`);
+    this.command.write(`GETTHERMOP ${vid}\n`);
   }
 
-  public Thermostat_SetIndoorTemperature(vid: string, value: number, mode: number, heating: number, cooling: number): void {
-    if (mode === 1) {
-      this.command.write(sprintf.sprintf('THERMTEMP %s HEAT %s\n', vid, value));
-    } else if (mode === 2) {
-      this.command.write(sprintf.sprintf('THERMTEMP %s COOL %s\n', vid, value));
-    } else if (mode === 3) {
-      if (value > cooling) {
-        this.command.write(sprintf.sprintf('THERMTEMP %s COOL %s\n', vid, value));
-      } else if (value < heating) {
-        this.command.write(sprintf.sprintf('THERMTEMP %s HEAT %s\n', vid, value));
-      }
-    }
+  async setThermostatMode(vid: string, mode: number) {
+    const out = mode === 0 ? 'OFF' : mode === 1 ? 'HEAT' : mode === 2 ? 'COOL' : 'AUTO';
+    this.command.write(`THERMOP ${vid} ${out}\n`);
   }
 
-  public Load_Dim(vid: string, level: number, time?: number): void {
-    const thisTime = time || 1;
-    this.command.write(sprintf.sprintf('INVOKE %s Load.Ramp 6 %s %s\n', vid, thisTime, level));
+  async setThermostatTarget(vid: string, value: number) {
+    // Mode-specific writes; legacy code often wrote both and relied on mode to select effective target.
+    const v = Math.round(value);
+    this.command.write(`THERMTEMP ${vid} HEAT ${v}\n`);
+    this.command.write(`THERMTEMP ${vid} COOL ${v}\n`);
   }
 
-  public setBlindPos(vid: string, pos: number): void {
-    this.command.write(sprintf.sprintf('BLIND %s POS %s\n', vid, pos));
+  // OPTIONAL: legacy name aliases (harmless no-ops to help grep/muscle memory)
+  Discover() {
+    return this.discoverDevices();
   }
-
-  public getBlindPos(vid: string): void {
-    this.command.write(sprintf.sprintf('GETBLIND %s \n', vid));
+  DiscoverSSL() {
+    this.isInsecureCfg = false;
+    return this.discoverDevices();
   }
-
-  public setRelay(vid: string, level: number): void {
-    this.command.write(sprintf.sprintf('LOAD %s %s\n', vid, level));
-  }
-} 
+}

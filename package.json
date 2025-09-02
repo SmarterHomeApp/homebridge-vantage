@@ -1,105 +1,54 @@
 {
   "name": "homebridge-vantage",
-  "displayName": "Vantage Controls",
   "version": "1.0.0",
-  "description": "Homebridge plugin for Vantage Controls InFusion system",
-  "main": "dist/index.js",
-  "private": true,
-  "scripts": {
-    "build": "tsc",
-    "watch": "npm run build && npm link && nodemon",
-    "dev": "npm run build && npm link",
-    "prepublishOnly": "npm run build",
-    "lint": "eslint src/**.ts",
-    "lint:fix": "eslint src/**.ts --fix"
-  },
+  "description": "Homebridge plugin for Vantage InFusion (dynamic platform, HB 1.6+ / 2.0 ready)",
+  "license": "MIT",
   "keywords": [
     "homebridge-plugin",
+    "homebridge",
     "vantage",
-    "controls",
     "infusion",
     "lighting",
-    "thermostat",
-    "blinds"
+    "hvac",
+    "shades"
   ],
-  "engines": {
-    "node": ">=18.0.0",
-    "homebridge": ">=1.6.0"
-  },
-  "dependencies": {
-    "net": "^1.0.2",
-    "tls": "^0.0.1",
-    "sprintf-js": "^1.1.2",
-    "fast-xml-parser": "^4.3.2"
-  },
-  "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@typescript-eslint/eslint-plugin": "^6.0.0",
-    "@typescript-eslint/parser": "^6.0.0",
-    "eslint": "^8.0.0",
-    "homebridge": "^1.6.0",
-    "nodemon": "^3.0.0",
-    "typescript": "^5.0.0"
-  },
+  "homepage": "https://github.com/SmarterHomeApp/homebridge-vantage",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/homebridge-vantage.git"
+    "url": "https://github.com/SmarterHomeApp/homebridge-vantage.git"
   },
   "bugs": {
-    "url": "https://github.com/yourusername/homebridge-vantage/issues"
+    "url": "https://github.com/SmarterHomeApp/homebridge-vantage/issues"
   },
-  "homepage": "https://github.com/yourusername/homebridge-vantage#readme",
-  "author": "Your Name",
-  "license": "MIT",
-  "homebridge": {
-    "pluginAlias": "VantageControls"
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "config.schema.json"
+  ],
+  "engines": {
+    "node": ">=20.19.0",
+    "homebridge": ">=1.6.0 <3.0.0"
   },
-  "configSchema": {
-    "platform": {
-      "type": "string",
-      "const": "VantageControls",
-      "required": true
-    },
-    "name": {
-      "type": "string",
-      "description": "Name for this Vantage Controls platform",
-      "required": true
-    },
-    "ipaddress": {
-      "type": "string",
-      "description": "IP address of your Vantage InFusion controller",
-      "format": "ipv4",
-      "required": true
-    },
-    "username": {
-      "type": "string",
-      "description": "Username for Vantage controller (leave empty if not required)",
-      "default": ""
-    },
-    "password": {
-      "type": "string",
-      "description": "Password for Vantage controller (leave empty if not required)",
-      "default": ""
-    },
-    "usecache": {
-      "type": "boolean",
-      "description": "Use cached configuration file if available",
-      "default": true
-    },
-    "omit": {
-      "type": "string",
-      "description": "Comma-separated list of Vantage IDs to exclude",
-      "default": ""
-    },
-    "range": {
-      "type": "string",
-      "description": "Range of Vantage IDs to include (e.g., '1,100')",
-      "default": ""
-    },
-    "isInsecure": {
-      "type": "boolean",
-      "description": "Use non-SSL connections (ports 3001/2001 instead of 3010/2010)",
-      "default": true
-    }
+  "scripts": {
+    "clean": "rimraf dist",
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -w -p tsconfig.json",
+    "lint": "eslint 'src/**/*.{ts,tsx}'",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "sprintf-js": "^1.1.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.11",
+    "@types/xml2js": "^0.4.14",
+    "eslint": "^9.12.0",
+    "homebridge": "^1.11.0",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.5.4",
+    "xml2js": "^0.6.2"
   }
-} 
+}
