@@ -17,6 +17,8 @@ export class VantagePlatform implements DynamicPlatformPlugin {
 
   private infusion!: VantageInfusion;
   private syncedOnce = false; // prevent double-sync when both event + promise fire
+  private accessoriesByVid = new Map<string, PlatformAccessory>();
+  private realtimeWired = false;
 
   constructor(
     public readonly log: Logger,
@@ -40,25 +42,10 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       log: this.log,
     });
 
-    // ----- Legacy event path: keep your old behavior -----
-    // this.infusion.on('endDownloadConfiguration', async (_xml: string) => {
-    //   // If promise path already completed, ignore; else run discovery+sync now
-    //   if (this.syncedOnce) return;
-    //   this.log.debug('endDownloadConfiguration event received — running discovery sync');
-    //   try {
-    //     const devices = await this.infusion.discoverDevices();
-    //     await this.syncAccessories(devices);
-    //     this.finalizeLogs();
-    //   } catch (e: any) {
-    //     this.log.error(`Discovery (event) failed: ${e?.message ?? String(e)}`);
-    //   }
-    // });
-
     // ----- Standard HB boot path -----
     this.api.on(APIEvent.DID_FINISH_LAUNCHING, async () => {
       try {
         await this.infusion.start();
-        // Promise-based discovery (will no-op if event already handled it)
         if (!this.syncedOnce) {
           const devices = await this.infusion.discoverDevices();
           await this.syncAccessories(devices);
@@ -85,6 +72,8 @@ export class VantagePlatform implements DynamicPlatformPlugin {
 
     // Update existing / mark seen
     const seen = new Set<string>();
+    const toUpdate: PlatformAccessory[] = [];
+
     for (const acc of this.accessories) {
       const d = wanted.get(acc.UUID);
       if (d) {
@@ -93,7 +82,15 @@ export class VantagePlatform implements DynamicPlatformPlugin {
         acc.context.device = d;
         new VantagePlatformAccessory(this, acc);
         seen.add(acc.UUID);
+        toUpdate.push(acc);
+
+        if (d.vid) this.accessoriesByVid.set(String(d.vid), acc);
       }
+    }
+
+    if (toUpdate.length) {
+      this.api.updatePlatformAccessories(toUpdate);
+      this.log.info(`Updated ${toUpdate.length} existing accessories`);
     }
 
     // Register new
@@ -107,6 +104,8 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       new VantagePlatformAccessory(this, acc);
       toRegister.push(acc);
       this.accessories.push(acc);
+
+      if (d.vid) this.accessoriesByVid.set(String(d.vid), acc);
     }
     if (toRegister.length) {
       this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, toRegister);
@@ -118,14 +117,131 @@ export class VantagePlatform implements DynamicPlatformPlugin {
     if (toUnregister.length) {
       this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, toUnregister);
       this.log.info(`Unregistered ${toUnregister.length} stale accessories`);
-      // Remove from local cache
+      // Remove from local cache & VID map
       for (const acc of toUnregister) {
+        const vid = acc?.context?.device?.vid;
+        if (vid) this.accessoriesByVid.delete(String(vid));
         const idx = this.accessories.findIndex((a) => a.UUID === acc.UUID);
         if (idx >= 0) this.accessories.splice(idx, 1);
       }
     }
 
+    // Arm realtime listeners once we know the VID→accessory map
+    this.wireRealtimeListeners();
+
     this.syncedOnce = true;
+  }
+
+  private wireRealtimeListeners() {
+    if (this.realtimeWired) return;
+    this.realtimeWired = true;
+
+    const S = this.api.hap.Service;
+    const C = this.api.hap.Characteristic;
+
+    // LIGHTS (relay / dimmer / rgb)
+    this.infusion.on('loadStatusChange', (vid: number, value: number, command?: number) => {
+      const acc = this.accessoriesByVid.get(String(vid));
+      if (!acc) return;
+
+      const dev = acc.context.device as VantageDevice;
+      if (!dev) return;
+      this.log.info("loadStatusChange (VID=%s, Name=%s, Bri:%d)", vid, dev.name, value)
+
+      if (dev.type === 'relay' || dev.type === 'dimmer' || dev.type === 'rgb') {
+        (dev as any).bri = Number(value);
+        (dev as any).power = (dev as any).bri > 0;
+      }
+
+      if (dev.type === 'relay') {
+        acc.getService(S.Switch)?.updateCharacteristic(C.On, (dev as any).power);
+        return;
+      }
+
+      if (dev.type === 'dimmer' || dev.type === 'rgb') {
+        const lb = acc.getService(S.Lightbulb);
+        lb?.updateCharacteristic(C.On, (dev as any).power);
+        lb?.updateCharacteristic(C.Brightness, (dev as any).bri);
+
+        // RGB incremental HSL feedback
+        if (dev.type === 'rgb' && typeof command === 'number') {
+          if (command === 0) (dev as any).hue = Number(value);
+          if (command === 1) (dev as any).sat = Number(value);
+          if (command === 2) (dev as any).bri = Number(value);
+
+          lb?.updateCharacteristic(C.Hue, (dev as any).hue ?? 0);
+          lb?.updateCharacteristic(C.Saturation, (dev as any).sat ?? 0);
+          lb?.updateCharacteristic(C.Brightness, (dev as any).bri ?? 0);
+        }
+      }
+    });
+
+    // BLINDS
+    this.infusion.on('blindStatusChange', (vid: number, value: number) => {
+      const acc = this.accessoriesByVid.get(String(vid));
+      if (!acc) return;
+
+      const dev = acc.context.device as VantageDevice;
+      if (!dev) return;
+      this.log.info("blindStatusChange (VID=%s, Name=%s, Pos:%d)", vid, dev.name, value);
+
+      (dev as any).pos = Number(value);
+      const wc = acc.getService(S.WindowCovering);
+      wc?.updateCharacteristic(C.CurrentPosition, (dev as any).pos);
+      wc?.updateCharacteristic(C.PositionState, 2); // Stopped
+    });
+
+    // THERMOSTATS — temp
+    this.infusion.on('thermostatIndoorTemperatureChange', (vid: number, temp: number) => {
+      const acc = this.accessoriesByVid.get(String(vid));
+      if (!acc) return;
+
+      const dev = acc.context.device as VantageDevice;
+      (dev as any).temperature = Number(temp);
+
+      acc.getService(S.Thermostat)
+        ?.updateCharacteristic(C.CurrentTemperature, (dev as any).temperature);
+    });
+
+    // THERMOSTATS — mode/targets
+    this.infusion.on('thermostatIndoorModeChange', (vid: number, mode: number, targetTemp: number) => {
+      const acc = this.accessoriesByVid.get(String(vid));
+      if (!acc) return;
+
+      const dev = acc.context.device as any;
+      const svc = acc.getService(S.Thermostat);
+      if (!svc || !dev) return;
+
+      (dev as any).mode = mode;
+
+      if (targetTemp === -1) {
+        // compute current state from thresholds + mode
+        let current = 0;
+        if ((dev as any).temperature <= (dev as any).heating && mode === 1) current = 1;
+        else if ((dev as any).temperature >= (dev as any).cooling && mode === 2) current = 2;
+        else if (mode === 3) {
+          if ((dev as any).temperature <= (dev as any).heating) current = 1;
+          else if ((dev as any).temperature >= (dev as any).cooling) current = 2;
+        }
+        svc.updateCharacteristic(C.CurrentHeatingCoolingState, current);
+        svc.updateCharacteristic(C.TargetHeatingCoolingState, mode);
+      } else {
+        (dev as any).targetTemp = Math.min(38, targetTemp);
+        if (mode === 1) {
+          (dev as any).heating = Math.min(30, targetTemp);
+          svc.updateCharacteristic(C.HeatingThresholdTemperature, (dev as any).heating);
+        } else if (mode === 2) {
+          (dev as any).cooling = Math.min(35, targetTemp);
+          svc.updateCharacteristic(C.CoolingThresholdTemperature, (dev as any).cooling);
+        }
+
+        if ((dev as any).mode === 1) (dev as any).targetTemp = (dev as any).heating;
+        else if ((dev as any).mode === 2) (dev as any).targetTemp = (dev as any).cooling;
+        else if ((dev as any).mode === 3) (dev as any).targetTemp = ((dev as any).temperature <= (dev as any).heating) ? (dev as any).heating : (dev as any).cooling;
+
+        svc.updateCharacteristic(C.TargetTemperature, (dev as any).targetTemp);
+      }
+    });
   }
 
   private finalizeLogs() {
