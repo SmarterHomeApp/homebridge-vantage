@@ -191,7 +191,7 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       wc?.updateCharacteristic(C.PositionState, 2); // Stopped
     });
 
-    // THERMOSTATS — temp
+    // THERMOSTATS — temp (legacy event)
     this.infusion.on('thermostatDidChange', (vid: number, temp: number) => {
       const acc = this.accessoriesByVid.get(String(vid));
       if (!acc) return;
@@ -199,10 +199,18 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       const dev = acc.context.device as VantageDevice;
       (dev as any).temperature = Number(temp);
 
-      const wc = acc.getService(S.Thermostat);
-      wc?.updateCharacteristic(C.CurrentTemperature, (dev as any).temperature);
-      wc?.updateCharacteristic(C.TargetTemperature, (dev as any).targetTemp);
-      wc?.updateCharacteristic(C.CurrentHeaterCoolerState, (dev as any).current);
+      const svc = acc.getService(S.Thermostat);
+      if (svc) {
+        svc.updateCharacteristic(C.CurrentTemperature, (dev as any).temperature);
+        svc.updateCharacteristic(C.TargetTemperature, (dev as any).targetTemp);
+        svc.updateCharacteristic(C.CurrentHeatingCoolingState, (dev as any).current);
+        
+        // Refresh thermostat state (from original code)
+        this.infusion.Thermostat_GetIndoorTemperature(String(vid));
+        this.infusion.Thermostat_GetState(String(vid));
+        this.infusion.Thermostat_GetHeating(String(vid));
+        this.infusion.Thermostat_GetCooling(String(vid));
+      }
     });
 
     // THERMOSTATS — temp
@@ -212,6 +220,7 @@ export class VantagePlatform implements DynamicPlatformPlugin {
 
       const dev = acc.context.device as VantageDevice;
       (dev as any).temperature = Number(temp);
+      this.log.info(`thermostatIndoorTemperatureChange (VID=${vid}, Name=${dev.name}, Temp=${temp})`);
 
       acc.getService(S.Thermostat)
         ?.updateCharacteristic(C.CurrentTemperature, (dev as any).temperature);
@@ -226,9 +235,11 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       const svc = acc.getService(S.Thermostat);
       if (!svc || !dev) return;
 
-      (dev as any).mode = mode;
+      this.log.info(`thermostatIndoorModeChange (VID=${vid}, Name=${dev.name}, Mode=${mode}, TargetTemp=${targetTemp})`);
 
       if (targetTemp === -1) {
+        // Only update mode when targetTemp is -1 (mode change without temperature)
+        (dev as any).mode = mode;
         // compute current state from thresholds + mode
         let current = 0;
         if ((dev as any).temperature <= (dev as any).heating && mode === 1) current = 1;
@@ -237,6 +248,7 @@ export class VantagePlatform implements DynamicPlatformPlugin {
           if ((dev as any).temperature <= (dev as any).heating) current = 1;
           else if ((dev as any).temperature >= (dev as any).cooling) current = 2;
         }
+        (dev as any).current = current; // Store the calculated current state
         svc.updateCharacteristic(C.CurrentHeatingCoolingState, current);
         svc.updateCharacteristic(C.TargetHeatingCoolingState, mode);
       } else {
@@ -249,6 +261,7 @@ export class VantagePlatform implements DynamicPlatformPlugin {
           svc.updateCharacteristic(C.CoolingThresholdTemperature, (dev as any).cooling);
         }
 
+        // Update target temperature based on mode (from original logic)
         if ((dev as any).mode === 1) (dev as any).targetTemp = (dev as any).heating;
         else if ((dev as any).mode === 2) (dev as any).targetTemp = (dev as any).cooling;
         else if ((dev as any).mode === 3) (dev as any).targetTemp = ((dev as any).temperature <= (dev as any).heating) ? (dev as any).heating : (dev as any).cooling;

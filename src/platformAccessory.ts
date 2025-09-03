@@ -106,13 +106,99 @@ export class VantagePlatformAccessory {
         this.accessory.getService(this.Service.Thermostat) ??
         this.accessory.addService(this.Service.Thermostat, this.accessory.displayName);
 
+      // Target Temperature
       const tgt = primary.getCharacteristic(this.Characteristic.TargetTemperature);
       tgt.removeAllListeners('set');
-      tgt.onSet((value) => this.platform.getInfusion().setThermostatTarget(device.address, Number(value)));
+      tgt.removeAllListeners('get');
+      tgt.onSet((value) => {
+        const dev = this.accessory.context.device as any;
+        dev.targetTemp = Number(value);
+        
+        // Logic from original: determine mode based on temperature comparison
+        if (dev.mode === 0) {
+          if (dev.targetTemp > dev.temperature) {
+            dev.mode = 1; // heat
+          } else if (dev.targetTemp < dev.temperature) {
+            dev.mode = 2; // cool
+          }
+          dev.current = dev.mode;
+        }
+        
+        // Update heating/cooling thresholds based on mode
+        if (dev.mode === 1) {
+          dev.heating = Number(value);
+        } else if (dev.mode === 2) {
+          dev.cooling = Number(value);
+        }
+        
+        this.platform.getInfusion().setThermostatTarget(device.address, Number(value), dev.mode, dev.heating, dev.cooling);
+      });
+      tgt.onGet(() => {
+        const dev = this.accessory.context.device as any;
+        return dev?.targetTemp ?? 20;
+      });
 
-      // Make sure required reads exist (they can be updated via events)
-      primary.getCharacteristic(this.Characteristic.CurrentTemperature);
-      primary.getCharacteristic(this.Characteristic.TargetTemperature);
+      // Target Heating/Cooling State
+      const mode = primary.getCharacteristic(this.Characteristic.TargetHeatingCoolingState);
+      mode.removeAllListeners('set');
+      mode.removeAllListeners('get');
+      mode.onSet((value) => {
+        const dev = this.accessory.context.device as any;
+        dev.mode = Number(value);
+        
+        // Logic from original: update target temperature based on mode
+        if (dev.mode === 1) {
+          dev.targetTemp = dev.heating;
+        } else if (dev.mode === 2) {
+          dev.targetTemp = dev.cooling;
+        } else if (dev.mode === 3) {
+          dev.targetTemp = (dev.temperature <= dev.heating) ? dev.heating : dev.cooling;
+        }
+        
+        this.platform.getInfusion().setThermostatMode(device.address, Number(value));
+      });
+      mode.onGet(() => {
+        const dev = this.accessory.context.device as any;
+        return dev?.mode ?? 0;
+      });
+
+      // Current Temperature
+      const currentTemp = primary.getCharacteristic(this.Characteristic.CurrentTemperature);
+      currentTemp.removeAllListeners('get');
+      currentTemp.onGet(() => {
+        const dev = this.accessory.context.device as any;
+        return dev?.temperature ?? 20;
+      });
+
+      // Current Heating/Cooling State
+      const currentState = primary.getCharacteristic(this.Characteristic.CurrentHeatingCoolingState);
+      currentState.removeAllListeners('get');
+      currentState.onGet(() => {
+        const dev = this.accessory.context.device as any;
+        return dev?.current ?? 0;
+      });
+
+      // Heating Threshold Temperature
+      const heatingThreshold = primary.getCharacteristic(this.Characteristic.HeatingThresholdTemperature);
+      heatingThreshold.removeAllListeners('get');
+      heatingThreshold.onGet(() => {
+        const dev = this.accessory.context.device as any;
+        return dev?.heating ?? 20;
+      });
+
+      // Cooling Threshold Temperature
+      const coolingThreshold = primary.getCharacteristic(this.Characteristic.CoolingThresholdTemperature);
+      coolingThreshold.removeAllListeners('get');
+      coolingThreshold.onGet(() => {
+        const dev = this.accessory.context.device as any;
+        return dev?.cooling ?? 25;
+      });
+
+      // Initialize thermostat state (from original code)
+      this.platform.getInfusion().Thermostat_GetIndoorTemperature(device.address);
+      this.platform.getInfusion().Thermostat_GetState(device.address);
+      this.platform.getInfusion().Thermostat_GetHeating(device.address);
+      this.platform.getInfusion().Thermostat_GetCooling(device.address);
 
       this.accessory.category = this.platform.api.hap.Categories.THERMOSTAT;
     }

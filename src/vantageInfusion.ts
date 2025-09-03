@@ -646,11 +646,39 @@ export class VantageInfusion extends EventEmitter {
     this.command.write(`THERMOP ${vid} ${out}\n`);
   }
 
-  async setThermostatTarget(vid: string, value: number) {
-    // Mode-specific writes; legacy code often wrote both and relied on mode to select effective target.
+  async setThermostatTarget(vid: string, value: number, mode?: number, heating?: number, cooling?: number) {
+    // Match original logic: set temperature based on mode
     const v = Math.round(value);
-    this.command.write(`THERMTEMP ${vid} HEAT ${v}\n`);
-    this.command.write(`THERMTEMP ${vid} COOL ${v}\n`);
+    if (mode === 1) {
+      this.command.write(`THERMTEMP ${vid} HEAT ${v}\n`);
+    } else if (mode === 2) {
+      this.command.write(`THERMTEMP ${vid} COOL ${v}\n`);
+    } else {
+      // If no mode specified, set both (legacy behavior)
+      this.command.write(`THERMTEMP ${vid} HEAT ${v}\n`);
+      this.command.write(`THERMTEMP ${vid} COOL ${v}\n`);
+    }
+  }
+
+  // Thermostat getter methods (from original code)
+  Thermostat_GetIndoorTemperature(vid: string) {
+    this.opts.log.debug(`Thermostat_GetIndoorTemperature ${vid}`);
+    this.command.write(`INVOKE ${vid} Thermostat.GetIndoorTemperature\n`);
+  }
+
+  Thermostat_GetState(vid: string) {
+    this.opts.log.debug(`Thermostat_GetState ${vid}`);
+    this.command.write(`GETTHERMOP ${vid}\n`);
+  }
+
+  Thermostat_GetHeating(vid: string) {
+    this.opts.log.debug(`Thermostat_GetHeating ${vid}`);
+    this.command.write(`GETTHERMTEMP ${vid} HEAT\n`);
+  }
+
+  Thermostat_GetCooling(vid: string) {
+    this.opts.log.debug(`Thermostat_GetCooling ${vid}`);
+    this.command.write(`GETTHERMTEMP ${vid} COOL\n`);
   }
 
   // OPTIONAL: legacy name aliases (harmless no-ops to help grep/muscle memory)
