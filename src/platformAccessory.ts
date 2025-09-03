@@ -167,7 +167,8 @@ export class VantagePlatformAccessory {
       currentTemp.removeAllListeners('get');
       currentTemp.onGet(() => {
         const dev = this.accessory.context.device as any;
-        return dev?.temperature ?? 20;
+        const temp = dev?.temperature ?? 20;
+        return Math.min(100, Math.max(-50, temp)); // Clamp to valid range
       });
 
       // Current Heating/Cooling State
@@ -183,7 +184,8 @@ export class VantagePlatformAccessory {
       heatingThreshold.removeAllListeners('get');
       heatingThreshold.onGet(() => {
         const dev = this.accessory.context.device as any;
-        return dev?.heating ?? 20;
+        const heating = dev?.heating ?? 20;
+        return Math.min(25, Math.max(10, heating)); // Clamp to valid range (10-25°C)
       });
 
       // Cooling Threshold Temperature

@@ -191,25 +191,21 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       wc?.updateCharacteristic(C.PositionState, 2); // Stopped
     });
 
-    // THERMOSTATS — temp (legacy event)
-    this.infusion.on('thermostatDidChange', (vid: number, temp: number) => {
-      const acc = this.accessoriesByVid.get(String(vid));
-      if (!acc) return;
-
-      const dev = acc.context.device as VantageDevice;
-      (dev as any).temperature = Number(temp);
-
-      const svc = acc.getService(S.Thermostat);
-      if (svc) {
-        svc.updateCharacteristic(C.CurrentTemperature, (dev as any).temperature);
-        svc.updateCharacteristic(C.TargetTemperature, (dev as any).targetTemp);
-        svc.updateCharacteristic(C.CurrentHeatingCoolingState, (dev as any).current);
-        
-        // Refresh thermostat state (from original code)
-        this.infusion.Thermostat_GetIndoorTemperature(String(vid));
-        this.infusion.Thermostat_GetState(String(vid));
-        this.infusion.Thermostat_GetHeating(String(vid));
-        this.infusion.Thermostat_GetCooling(String(vid));
+    // THERMOSTATS — temp (legacy event) - loops through ALL thermostats like original
+    this.infusion.on('thermostatDidChange', (value: number) => {
+      // Loop through all thermostat accessories and refresh their state
+      for (const [vid, acc] of this.accessoriesByVid) {
+        const dev = acc.context.device as VantageDevice;
+        if (dev && dev.type === 'thermostat') {
+          const svc = acc.getService(S.Thermostat);
+          if (svc) {
+            // Refresh thermostat state (from original code)
+            this.infusion.Thermostat_GetIndoorTemperature(vid);
+            this.infusion.Thermostat_GetState(vid);
+            this.infusion.Thermostat_GetHeating(vid);
+            this.infusion.Thermostat_GetCooling(vid);
+          }
+        }
       }
     });
 
@@ -219,11 +215,19 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       if (!acc) return;
 
       const dev = acc.context.device as VantageDevice;
-      (dev as any).temperature = Number(temp);
-      this.log.info(`thermostatIndoorTemperatureChange (VID=${vid}, Name=${dev.name}, Temp=${temp})`);
+      let temperature = Number(temp);
+      
+      // Validate temperature range (from original code)
+      if (temperature > 100) {
+        temperature = 100;
+        this.log.warn(`Thermostat ${vid} reported invalid temperature ${temp}°C, capping at 100°C`);
+      }
+      
+      (dev as any).temperature = temperature;
+      this.log.info(`thermostatIndoorTemperatureChange (VID=${vid}, Name=${dev.name}, Temp=${temperature})`);
 
       acc.getService(S.Thermostat)
-        ?.updateCharacteristic(C.CurrentTemperature, (dev as any).temperature);
+        ?.updateCharacteristic(C.CurrentTemperature, temperature);
     });
 
     // THERMOSTATS — mode/targets
@@ -236,6 +240,7 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       if (!svc || !dev) return;
 
       this.log.info(`thermostatIndoorModeChange (VID=${vid}, Name=${dev.name}, Mode=${mode}, TargetTemp=${targetTemp})`);
+      // this.log.info(`Before update - dev.mode=${dev.mode}, dev.targetTemp=${dev.targetTemp}, dev.heating=${dev.heating}, dev.cooling=${dev.cooling}`);
 
       if (targetTemp === -1) {
         // Only update mode when targetTemp is -1 (mode change without temperature)
@@ -254,7 +259,7 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       } else {
         (dev as any).targetTemp = Math.min(38, targetTemp);
         if (mode === 1) {
-          (dev as any).heating = Math.min(30, targetTemp);
+          (dev as any).heating = Math.min(25, targetTemp); // HomeKit max is 25°C
           svc.updateCharacteristic(C.HeatingThresholdTemperature, (dev as any).heating);
         } else if (mode === 2) {
           (dev as any).cooling = Math.min(35, targetTemp);
@@ -267,6 +272,9 @@ export class VantagePlatform implements DynamicPlatformPlugin {
         else if ((dev as any).mode === 3) (dev as any).targetTemp = ((dev as any).temperature <= (dev as any).heating) ? (dev as any).heating : (dev as any).cooling;
 
         svc.updateCharacteristic(C.TargetTemperature, (dev as any).targetTemp);
+        svc.updateCharacteristic(C.TargetHeatingCoolingState, (dev as any).mode);
+        
+        // this.log.info(`After update - dev.mode=${dev.mode}, dev.targetTemp=${dev.targetTemp}, dev.heating=${dev.heating}, dev.cooling=${dev.cooling}`);
       }
     });
   }

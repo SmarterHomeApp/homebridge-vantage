@@ -162,7 +162,7 @@ export class VantageInfusion extends EventEmitter {
     for (const line of lines) {
       if (!line) continue;
       const dataItem = line.split(' ');
-      this.opts.log.info(line)
+      // this.opts.log.info(line)
       try {
         if (
           line.startsWith('S:BLIND') ||
