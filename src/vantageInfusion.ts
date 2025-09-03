@@ -1,10 +1,10 @@
-import { EventEmitter } from 'node:events';
-import * as net from 'node:net';
-import * as tls from 'node:tls';
+import { EventEmitter } from 'events';
+import * as net from 'net';
+import * as tls from 'tls';
 import { Parser } from 'xml2js';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import * as os from 'node:os';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 import type { Logger } from 'homebridge';
 import type { VantageDevice } from './types';
 
