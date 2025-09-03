@@ -56,7 +56,7 @@
         "type": "string",
         "default": "0,999999999",
         "placeholder": "0,999999999",
-        "description": "Include only VIDs within this inclusive range, e.g. 0,5000."
+        "description": "Include only VIDs within this inclusive range, e.g. 0,5000. If you have more than 140 loads, add 2 instances of the vantage platform with different ranges."
       }
     },
     "required": ["name", "ipaddress"],

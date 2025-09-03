@@ -2,6 +2,9 @@ import { EventEmitter } from 'node:events';
 import * as net from 'node:net';
 import * as tls from 'node:tls';
 import { Parser } from 'xml2js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import type { Logger } from 'homebridge';
 import type { VantageDevice } from './types';
 
@@ -53,6 +56,15 @@ export class VantageInfusion extends EventEmitter {
   private command!: net.Socket | tls.TLSSocket;
   private isInsecureCmd = true; // 3001 vs 3010
   private isInsecureCfg = true; // 2001 vs 2010
+  
+  private getCacheFilePath(): string {
+    // Try /tmp first (Linux/macOS), then fall back to user's home directory
+    const tmpPath = '/tmp/vantage.dc';
+    if (fs.existsSync('/tmp')) {
+      return tmpPath;
+    }
+    return path.join(os.homedir(), 'vantage.dc');
+  }
 
   constructor(private readonly opts: Options) {
     super();
@@ -176,22 +188,22 @@ export class VantageInfusion extends EventEmitter {
         }
         if (dataItem[0] === 'R:INVOKE' && (dataItem[3] || '').includes('RGBLoad.GetHSL')) {
           this.emit('loadStatusChange', Number.parseInt(dataItem[1]), Number.parseInt(dataItem[2]), Number.parseInt(dataItem[4]));
-        }
-        if (dataItem[0] === 'S:TEMP') {
+          }
+          if (dataItem[0] === 'S:TEMP') {
           this.emit('thermostatDidChange', Number.parseInt(dataItem[2]));
         } else if (dataItem[0] === 'R:INVOKE' && (dataItem[3] || '').includes('Thermostat.GetIndoorTemperature')) {
           this.emit('thermostatIndoorTemperatureChange', Number.parseInt(dataItem[1]), Number.parseFloat(dataItem[2]));
-        } else if (dataItem[0] === 'S:THERMOP' || dataItem[0] === 'R:GETTHERMOP' || dataItem[0] === 'R:THERMTEMP') {
-          let modeVal = 0;
+          } else if (dataItem[0] === 'S:THERMOP' || dataItem[0] === 'R:GETTHERMOP' || dataItem[0] === 'R:THERMTEMP') {
+            let modeVal = 0;
           const token = dataItem[2] || '';
           if (token.includes('OFF')) modeVal = 0;
           else if (token.includes('HEAT')) modeVal = 1;
           else if (token.includes('COOL')) modeVal = 2;
           else modeVal = 3;
 
-          if (dataItem[0] === 'S:THERMOP' || dataItem[0] === 'R:GETTHERMOP') {
+            if (dataItem[0] === 'S:THERMOP' || dataItem[0] === 'R:GETTHERMOP') {
             this.emit('thermostatIndoorModeChange', Number.parseInt(dataItem[1]), modeVal, -1);
-          } else {
+            } else {
             this.emit(
               'thermostatIndoorModeChange',
               Number.parseInt(dataItem[1]),
@@ -224,10 +236,28 @@ export class VantageInfusion extends EventEmitter {
   }
   /** XML/config discovery; returns devices (replaces old Discover/DiscoverSSL) */
   async discoverDevices(): Promise<VantageDevice[]> {
+    // Check for cached configuration first
+    if (this.opts.usecache) {
+      const cachePath = this.getCacheFilePath();
+      if (fs.existsSync(cachePath)) {
+        try {
+          const cachedXml = fs.readFileSync(cachePath, 'utf8');
+          this.opts.log.info(`Using cached configuration from ${cachePath}`);
+          return this.processConfigurationXml(cachedXml);
+        } catch (error) {
+          this.opts.log.warn(`Failed to read cached configuration: ${error}`);
+        }
+      }
+    }
+    
     const xml = await this.pullConfigurationXml();
-    // Legacy: “end configuration download”
+    // Legacy: "end configuration download"
     this.opts.log.debug('VantagePlatform for InFusion Controller (end configuration download)');
-
+    
+    return this.processConfigurationXml(xml);
+  }
+  
+  private async processConfigurationXml(xml: string): Promise<VantageDevice[]> {
     const sanitized = this.sanitizeXml(xml);
     const parsed = await this.xml.parseStringPromise(sanitized).catch(() => ({} as any));
     const devices: VantageDevice[] = [];
@@ -381,6 +411,17 @@ export class VantageInfusion extends EventEmitter {
         if ((finishOnce as any)._done) return;
         (finishOnce as any)._done = true;
   
+        // Save configuration to cache if usecache is enabled
+        if (this.opts.usecache) {
+          try {
+            const cachePath = this.getCacheFilePath();
+            fs.writeFileSync(cachePath, xml);
+            this.opts.log.info(`Configuration cached to ${cachePath}`);
+          } catch (error) {
+            this.opts.log.warn(`Failed to cache configuration: ${error}`);
+          }
+        }
+  
         // legacy log + event
         this.opts.log.debug('VantagePlatform for InFusion Controller (end configuration download)');
         this.emit('endDownloadConfiguration', xml);
@@ -391,13 +432,13 @@ export class VantageInfusion extends EventEmitter {
   
       const onData = (socket: net.Socket | tls.TLSSocket) => {
         this.opts.log.info('load dc file'); // legacy
-  
-        let buffer = '';
+
+      let buffer = '';
         let controller = 1;
         let shouldBreak = false;
-        const readObjects: any[] = [];
+      const readObjects: any[] = [];
         const objectDict: Record<string, string> = {};
-        let writeCount = 0;
+      let writeCount = 0;
   
         // progress watchdog: if we stop seeing new parsable states, finish with what we have
         let lastProgress = Date.now();
@@ -472,22 +513,22 @@ export class VantageInfusion extends EventEmitter {
             // ----- OPEN FILTER (handle) -----
             if (parsed?.IConfiguration?.OpenFilter?.return) {
               if (!buffer.includes(`<?Master ${controller}?>`) && buffer.includes(`<?Master`)) {
-                if (controller === 1) {
+              if (controller === 1) {
                   try {
-                    const tmpStr = buffer.slice(9);
-                    const res = tmpStr.split('?');
+                const tmpStr = buffer.slice(9);
+                const res = tmpStr.split('?');
                     controller = parseInt(res[0])
                   } catch { /* ignore */ }
-                } else {
+              } else {
                   this.opts.log.info("breaking")
                   shouldBreak = true;
                 }
               }
               const hFilter = parsed.IConfiguration.OpenFilter.return;
               if (!objectDict[hFilter] && !shouldBreak) {
-                buffer = '';
+              buffer = '';
                 objectDict[hFilter] = hFilter;
-                writeCount++;
+              writeCount++;
                 socket.write(
                   `<IConfiguration><GetFilterResults><call><Count>1000</Count><WholeObject>true</WholeObject><hFilter>${hFilter}</hFilter></call></GetFilterResults></IConfiguration>\n`,
                 );
@@ -498,7 +539,7 @@ export class VantageInfusion extends EventEmitter {
 
             // ----- GET FILTER RESULTS -----
             if (parsed?.IConfiguration?.GetFilterResults?.return?.Object) {
-              const elements = parsed.IConfiguration.GetFilterResults.return.Object;
+            const elements = parsed.IConfiguration.GetFilterResults.return.Object;
               const list = Array.isArray(elements) ? elements : [elements];
   
               for (const el of list) {
@@ -507,8 +548,8 @@ export class VantageInfusion extends EventEmitter {
                 if (item) item.ObjectType = type;
                 const elemDict: any = {};
                 elemDict[type] = item;
-                readObjects.push(elemDict);
-              }
+                  readObjects.push(elemDict);
+                }
   
               buffer = '';
               if (writeCount >= OBJECT_TYPES.length) {
@@ -520,11 +561,11 @@ export class VantageInfusion extends EventEmitter {
             }
 
             if (parsed?.IConfiguration?.GetFilterResults) {
-              buffer = '';
+            buffer = '';
               if (writeCount >= OBJECT_TYPES.length) {
-                controller++;
-                writeCount = 0;
-              }
+              controller++;
+              writeCount = 0;
+            }
               writeOpenFilter()
               return;
             }
@@ -597,7 +638,7 @@ export class VantageInfusion extends EventEmitter {
       }
     });
   }
-  
+
   
 
   // ===== Commands used by platformAccessory handlers =====
