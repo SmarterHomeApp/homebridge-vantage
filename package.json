@@ -1,5 +1,5 @@
 {
-  "name": "homebridge-vantage",
+  "name": "@smarterhomeapp/homebridge-vantage",
   "version": "1.0.0",
   "description": "Homebridge plugin for Vantage InFusion (dynamic platform, HB 1.6+ / 2.0 ready)",
   "license": "MIT",
@@ -39,16 +39,16 @@
     "lint": "eslint 'src/**/*.{ts,tsx}'",
     "prepublishOnly": "npm run build"
   },
-  "dependencies": {
-    "sprintf-js": "^1.1.3"
-  },
-  "devDependencies": {
-    "@types/node": "^20.19.11",
-    "@types/xml2js": "^0.4.14",
-    "eslint": "^9.12.0",
-    "homebridge": "^1.11.0",
-    "rimraf": "^6.0.1",
-    "typescript": "^5.5.4",
-    "xml2js": "^0.6.2"
-  }
+"dependencies": {
+  "sprintf-js": "^1.1.3",
+  "xml2js": "^0.6.2"
+},
+"devDependencies": {
+  "@types/xml2js": "^0.4.14",
+  "homebridge": "^1.11.0",
+  "typescript": "^5.5.4",
+  "eslint": "^9.12.0",
+  "@types/node": "^20.19.11",
+  "rimraf": "^6.0.1"
+}
 }

@@ -1,28 +1,84 @@
 {
-    "pluginAlias": "VantageControls",
-    "pluginType": "platform",
-    "schema": {
-      "type": "object",
-      "properties": {
-        "platform": {
-          "title": "Platform Name",
-          "type": "string",
-          "const": "VantageControls"
-        },
-        "ipaddress": {
-          "title": "Controller IP",
-          "type": "string",
-          "format": "ipv4"
-        },
-        "username": { "title": "Username", "type": "string" },
-        "password": { "title": "Password", "type": "string" },
-        "usecache": { "title": "Use Cache", "type": "boolean", "default": true },
-        "omit": { "title": "Omit (comma-separated VIDs)", "type": "string" },
-        "range": { "title": "VID Range (min,max)", "type": "string", "default": "0,999999999" },
-        "forceSSL": { "title": "Force SSL", "type": "boolean", "default": false }
+  "pluginAlias": "VantageControls",
+  "pluginType": "platform",
+
+  "headerDisplay": "## Vantage Controls\nConfigure your Vantage InFusion controller.",
+
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "VantageControls",
+        "description": "A label for this platform entry."
       },
-      "required": ["platform", "ipaddress"],
-      "additionalProperties": false
+      "ipaddress": {
+        "title": "Controller IP",
+        "type": "string",
+        "format": "ipv4",
+        "placeholder": "192.168.1.50",
+        "description": "IP address of your Vantage InFusion controller."
+      },
+      "username": {
+        "title": "Username",
+        "type": "string",
+        "placeholder": "optional",
+        "description": "Only needed if your controller requires login."
+      },
+      "password": {
+        "title": "Password",
+        "type": "string",
+        "format": "password",
+        "placeholder": "optional",
+        "description": "Only needed if your controller requires login."
+      },
+      "forceSSL": {
+        "title": "Force SSL",
+        "type": "boolean",
+        "default": false,
+        "description": "Skip insecure ports and use 3010/2010 directly."
+      },
+      "usecache": {
+        "title": "Use Local Cache",
+        "type": "boolean",
+        "default": true,
+        "description": "Use previously downloaded configuration (if present) to speed up startup."
+      },
+      "omit": {
+        "title": "Omit VIDs",
+        "type": "string",
+        "placeholder": "123,456,789",
+        "description": "Comma-separated list of Vantage object VIDs to skip."
+      },
+      "range": {
+        "title": "VID Range",
+        "type": "string",
+        "default": "0,999999999",
+        "placeholder": "0,999999999",
+        "description": "Include only VIDs within this inclusive range, e.g. 0,5000."
+      }
+    },
+    "required": ["name", "ipaddress"],
+    "additionalProperties": false
+  },
+
+  "layout": [
+    "name",
+    "ipaddress",
+    {
+      "type": "flex",
+      "flex-flow": "row wrap",
+      "items": ["username", "password"]
+    },
+    "forceSSL",
+    "usecache",
+    {
+      "type": "fieldset",
+      "title": "Advanced",
+      "expandable": true,
+      "expanded": false,
+      "items": ["omit", "range"]
     }
-  }
-  
+  ]
+}
