@@ -162,6 +162,7 @@ export class VantageInfusion extends EventEmitter {
     for (const line of lines) {
       if (!line) continue;
       const dataItem = line.split(' ');
+      this.opts.log.info(line)
       try {
         if (
           line.startsWith('S:BLIND') ||
@@ -266,6 +267,7 @@ export class VantageInfusion extends EventEmitter {
       };
 
       if (it.DeviceCategory === 'HVAC' || TYPE_THERMO.includes(it.ObjectType)) {
+        this.opts.log.info(`New HVAC added (VID=${it.VID}, Name=${it.Name})`);
         pushUnique({
           name,
           address: vid,
@@ -419,7 +421,7 @@ export class VantageInfusion extends EventEmitter {
         }, 750);
   
         const writeOpenFilter = () => {
-          const type = OBJECT_TYPES[writeCount] ?? OBJECT_TYPES[0];
+          const type = OBJECT_TYPES[writeCount];
           this.opts.log.info(`parse Json: ${type} on controller: ${controller.toString()}`); // legacy text, visible
           socket.write(
             `<?Master ${controller}?>` +
@@ -462,20 +464,22 @@ export class VantageInfusion extends EventEmitter {
               else this.opts.log.warn('Login failed trying to get data anyways');
               buffer = '';
               clearLoginFallback();
+              writeCount = 0;
               writeOpenFilter();
-              return;
+              // return;
             }
   
             // ----- OPEN FILTER (handle) -----
             if (parsed?.IConfiguration?.OpenFilter?.return) {
-              if (!buffer.includes(`<?Master ${controller}?>`)) {
+              if (!buffer.includes(`<?Master ${controller}?>`) && buffer.includes(`<?Master`)) {
                 if (controller === 1) {
                   try {
                     const tmpStr = buffer.slice(9);
                     const res = tmpStr.split('?');
-                    controller = Number.parseInt(res[0], 10);
+                    controller = parseInt(res[0])
                   } catch { /* ignore */ }
                 } else {
+                  this.opts.log.info("breaking")
                   shouldBreak = true;
                 }
               }
@@ -489,9 +493,9 @@ export class VantageInfusion extends EventEmitter {
                 );
                 progress();
               }
-              return;
+            return;
             }
-  
+
             // ----- GET FILTER RESULTS -----
             if (parsed?.IConfiguration?.GetFilterResults?.return?.Object) {
               const elements = parsed.IConfiguration.GetFilterResults.return.Object;
@@ -511,7 +515,17 @@ export class VantageInfusion extends EventEmitter {
                 controller++;
                 writeCount = 0;
               }
-              writeOpenFilter();
+              // writeOpenFilter()
+              // return;
+            }
+
+            if (parsed?.IConfiguration?.GetFilterResults) {
+              buffer = '';
+              if (writeCount >= OBJECT_TYPES.length) {
+                controller++;
+                writeCount = 0;
+              }
+              writeOpenFilter()
               return;
             }
   
@@ -535,6 +549,7 @@ export class VantageInfusion extends EventEmitter {
         });
   
         socket.on('end', () => {
+          this.opts.log.info("ending" + shouldBreak)
           if (!(finishOnce as any)._done && readObjects.length) {
             const xml =
               '<Project><Objects>' +
@@ -552,6 +567,7 @@ export class VantageInfusion extends EventEmitter {
         });
   
         socket.on('close', () => {
+          this.opts.log.info("closing" + shouldBreak)
           if (!(finishOnce as any)._done && readObjects.length) {
             const xml =
               '<Project><Objects>' +

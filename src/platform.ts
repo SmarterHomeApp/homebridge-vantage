@@ -192,6 +192,20 @@ export class VantagePlatform implements DynamicPlatformPlugin {
     });
 
     // THERMOSTATS — temp
+    this.infusion.on('thermostatDidChange', (vid: number, temp: number) => {
+      const acc = this.accessoriesByVid.get(String(vid));
+      if (!acc) return;
+
+      const dev = acc.context.device as VantageDevice;
+      (dev as any).temperature = Number(temp);
+
+      const wc = acc.getService(S.Thermostat);
+      wc?.updateCharacteristic(C.CurrentTemperature, (dev as any).temperature);
+      wc?.updateCharacteristic(C.TargetTemperature, (dev as any).targetTemp);
+      wc?.updateCharacteristic(C.CurrentHeaterCoolerState, (dev as any).current);
+    });
+
+    // THERMOSTATS — temp
     this.infusion.on('thermostatIndoorTemperatureChange', (vid: number, temp: number) => {
       const acc = this.accessoriesByVid.get(String(vid));
       if (!acc) return;

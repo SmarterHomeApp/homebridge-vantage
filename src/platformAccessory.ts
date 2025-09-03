@@ -101,6 +101,22 @@ export class VantagePlatformAccessory {
       this.accessory.category = this.platform.api.hap.Categories.WINDOW_COVERING;
     }
 
+    if (device.type === 'thermostat') {
+      primary =
+        this.accessory.getService(this.Service.Thermostat) ??
+        this.accessory.addService(this.Service.Thermostat, this.accessory.displayName);
+
+      const tgt = primary.getCharacteristic(this.Characteristic.TargetTemperature);
+      tgt.removeAllListeners('set');
+      tgt.onSet((value) => this.platform.getInfusion().setThermostatTarget(device.address, Number(value)));
+
+      // Make sure required reads exist (they can be updated via events)
+      primary.getCharacteristic(this.Characteristic.CurrentTemperature);
+      primary.getCharacteristic(this.Characteristic.TargetTemperature);
+
+      this.accessory.category = this.platform.api.hap.Categories.THERMOSTAT;
+    }
+
     if (!primary) {
       this.platform.log.warn(`Unsupported device type ${device.type} for ${this.accessory.displayName}`);
       return;
