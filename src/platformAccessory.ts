@@ -58,14 +58,23 @@ export class VantagePlatformAccessory {
       // On
       const on = primary.getCharacteristic(this.Characteristic.On);
       on.removeAllListeners('set');
-      on.onSet(async (value) =>
-        this.platform.getInfusion().setRelayOrDim(device.address, !!value, device.bri ?? 100, device.type),
-      );
+      on.onSet(async (value) => {
+        (device as any).power = !!value;
+        if ((device as any).power && (device as any).bri === 0) {
+          (device as any).bri = 100;
+        }
+        const level = (device as any).power ? (device as any).bri : 0;
+        this.platform.getInfusion().setBrightness(device.address, level);
+      });
 
       // Brightness (required for dimmer)
       const bri = primary.getCharacteristic(this.Characteristic.Brightness);
       bri.removeAllListeners('set');
-      bri.onSet(async (value) => this.platform.getInfusion().setBrightness(device.address, Number(value)));
+      bri.onSet(async (value) => {
+        (device as any).bri = Number(value);
+        (device as any).power = (device as any).bri > 0;
+        this.platform.getInfusion().setBrightness(device.address, (device as any).bri);
+      });
 
       // RGB extras
       if (device.type === 'rgb') {

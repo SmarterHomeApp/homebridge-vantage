@@ -1,6 +1,6 @@
 {
   "name": "@smarterhomeapp/homebridge-vantage",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Homebridge plugin for Vantage InFusion (dynamic platform, HB 1.6+ / 2.0 ready)",
   "license": "MIT",
   "keywords": [

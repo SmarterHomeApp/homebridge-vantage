@@ -161,7 +161,12 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       if (dev.type === 'dimmer' || dev.type === 'rgb') {
         const lb = acc.getService(S.Lightbulb);
         lb?.updateCharacteristic(C.On, (dev as any).power);
-        lb?.updateCharacteristic(C.Brightness, (dev as any).bri);
+        
+        // Update brightness value without triggering UI updates (modern approach)
+        const brightnessChar = lb?.getCharacteristic(C.Brightness);
+        if (brightnessChar) {
+          brightnessChar.value = (dev as any).bri;
+        }
 
         // RGB incremental HSL feedback
         if (dev.type === 'rgb' && typeof command === 'number') {
@@ -169,9 +174,13 @@ export class VantagePlatform implements DynamicPlatformPlugin {
           if (command === 1) (dev as any).sat = Number(value);
           if (command === 2) (dev as any).bri = Number(value);
 
-          lb?.updateCharacteristic(C.Hue, (dev as any).hue ?? 0);
-          lb?.updateCharacteristic(C.Saturation, (dev as any).sat ?? 0);
-          lb?.updateCharacteristic(C.Brightness, (dev as any).bri ?? 0);
+          const hueChar = lb?.getCharacteristic(C.Hue);
+          const satChar = lb?.getCharacteristic(C.Saturation);
+          const briChar = lb?.getCharacteristic(C.Brightness);
+          
+          if (hueChar) hueChar.value = (dev as any).hue ?? 0;
+          if (satChar) satChar.value = (dev as any).sat ?? 0;
+          if (briChar) briChar.value = (dev as any).bri ?? 0;
         }
       }
     });

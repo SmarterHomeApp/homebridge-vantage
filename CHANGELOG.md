@@ -5,14 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - 2024-01-01
+## [1.0.1] - 2025-09-27
 
-### Added
-- Initial release of Homebridge Vantage Controls plugin
-- Support for Vantage Controls InFusion system
-- Lighting control (dimmers, RGB lights, relays)
-- Thermostat control with heating/cooling modes
-- Blind/shade control
+### Fixed
+- Fixed 1% brightness issue where lights would be set to 1% even when turned off or set to other percentages
+- Removed redundant `setRelayOrDim` function that was causing inconsistent brightness behavior
+- Improved brightness state management to match original implementation
+- Updated real-time status updates to use modern Homebridge API (replaced deprecated `getValue()`)
+
+### Changed
+- Simplified brightness control logic by using `setBrightness` and `setRelay` functions directly
+- Updated status update handling to prevent UI conflicts during slider interactions
 - Real-time status updates
 - SSL/TLS support
 - Device filtering and range selection

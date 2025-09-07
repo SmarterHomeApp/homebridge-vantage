@@ -643,12 +643,6 @@ export class VantageInfusion extends EventEmitter {
 
   // ===== Commands used by platformAccessory handlers =====
 
-  async setRelayOrDim(vid: string, on: boolean, bri: number, type: VantageDevice['type']) {
-    if (type === 'relay') return this.setRelay(vid, on);
-    const level = on ? Math.max(1, Number(bri)) : 0;
-    // Ramp (duration=1) to desired level (matches legacy Load.Ramp usage)
-    this.command.write(`INVOKE ${vid} Load.Ramp 6 1 ${level}\n`);
-  }
 
   async setBrightness(vid: string, level: number) {
     const lvl = Math.max(0, Math.min(100, Number(level)));
