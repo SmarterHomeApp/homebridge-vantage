@@ -248,7 +248,7 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       const svc = acc.getService(S.Thermostat);
       if (!svc || !dev) return;
 
-      this.log.info(`thermostatIndoorModeChange (VID=${vid}, Name=${dev.name}, Mode=${mode}, TargetTemp=${targetTemp})`);
+      this.log.debug(`thermostatIndoorModeChange (VID=${vid}, Name=${dev.name}, Mode=${mode}, TargetTemp=${targetTemp})`);
       // this.log.info(`Before update - dev.mode=${dev.mode}, dev.targetTemp=${dev.targetTemp}, dev.heating=${dev.heating}, dev.cooling=${dev.cooling}`);
 
       if (targetTemp === -1) {

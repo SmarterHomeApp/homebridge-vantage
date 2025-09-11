@@ -76,11 +76,16 @@ export class VantageInfusion extends EventEmitter {
       this.isInsecureCmd = false;
       this.isInsecureCfg = false;
     } else {
-      this.isInsecureCmd = await this.portUsable(3001, 'STATUS ALL\n');
-      this.isInsecureCfg = await this.portUsable(
+      // Probe sequentially to avoid controller session limits
+      const cmdResult = await this.portUsable(3001, 'STATUS ALL\n');
+      // brief backoff before probing config port
+      await new Promise((r) => setTimeout(r, 150));
+      const cfgResult = await this.portUsable(
         2001,
         '<IIntrospection><GetInterfaces><call></call></GetInterfaces></IIntrospection>\n',
       );
+      this.isInsecureCmd = !!cmdResult;
+      this.isInsecureCfg = !!cfgResult;
     }
 
     // Legacy-style port logs
@@ -93,20 +98,51 @@ export class VantageInfusion extends EventEmitter {
   private portUsable(port: number, probe: string): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       let sawData = false;
+      this.opts.log.debug(`Testing ${this.opts.ipaddress}:${port} with probe: "${probe.trim()}"`);
+
       const sock = net.connect({ host: this.opts.ipaddress, port }, () => {
+        this.opts.log.debug(`Connected to ${this.opts.ipaddress}:${port}`);
+        // improve send behavior
+        sock.setNoDelay(true);
+        // keep a post-connect timeout; fail if no reply in time
+        sock.setTimeout(8000);
+        // write immediately
+        this.opts.log.debug(`Sending initial probe on port ${port}`);
         sock.write(probe);
+        // send a second probe shortly after to coax a response
+        setTimeout(() => {
+          if (!sawData) {
+            this.opts.log.debug(`Re-sending probe on port ${port}`);
+            sock.write(probe);
+          }
+        }, 150);
       });
-      sock.setTimeout(5000, () => sock.destroy());
-      sock.once('connect', () => sock.setTimeout(0));
-      sock.on('data', () => {
+
+      sock.once('connect', () => {
+        this.opts.log.debug(`Port ${port} connection established`);
+      });
+
+      sock.on('data', (data) => {
+        const text = data.toString();
+        this.opts.log.debug(`Port ${port} received data: ${text.slice(0,200).replace(/\r/g,'\\r').replace(/\n/g,'\\n')}`);
         sawData = true;
         resolve(true);
         sock.destroy();
       });
+
+      sock.on('timeout', () => {
+        this.opts.log.debug(`Port ${port} post-connect timeout`);
+        sock.destroy();
+      });
+
       sock.on('close', () => {
+        this.opts.log.debug(`Port ${port} closed, sawData: ${sawData}`);
         if (!sawData) resolve(false);
       });
-      sock.on('error', () => {
+
+      sock.on('error', (err) => {
+        const msg = err instanceof Error ? `${(err as any).code || ''} ${err.message}` : String(err);
+        this.opts.log.debug(`Port ${port} error: ${msg}`);
         /* resolve on close path */
       });
     });
@@ -608,7 +644,7 @@ export class VantageInfusion extends EventEmitter {
         });
   
         socket.on('close', () => {
-          this.opts.log.info("closing" + shouldBreak)
+          this.opts.log.debug("closing " + shouldBreak)
           if (!(finishOnce as any)._done && readObjects.length) {
             const xml =
               '<Project><Objects>' +
