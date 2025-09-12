@@ -1,6 +1,7 @@
 # Homebridge Vantage Controls
 
-A [Homebridge](https://homebridge.io/) plugin for Vantage Controls InFusion system.
+A [Homebridge](https://homebridge.io/) plugin for Vantage Controls InFusion system. 
+This plugin replaces the one sold on smarterhome.io allowing anyone to download on the platform of their choice.
 
 ## Features
 
@@ -20,7 +21,7 @@ npm install -g homebridge
 
 2. Install this plugin:
 ```bash
-npm install -g homebridge-vantage
+npm install -g @smarterhomeapp/homebridge-vantage
 ```
 
 3. Add the platform to your `config.json`:
@@ -74,7 +75,7 @@ npm install -g homebridge-vantage
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/homebridge-vantage.git
+git clone https://github.com/smarterhomeapp/homebridge-vantage.git
 cd homebridge-vantage
 ```
 
@@ -125,5 +126,5 @@ MIT License - see LICENSE file for details.
 ## Support
 
 For issues and questions:
-- [GitHub Issues](https://github.com/yourusername/homebridge-vantage/issues)
+- [GitHub Issues](https://github.com/smarterhomeapp/homebridge-vantage/issues)
 - [Homebridge Community](https://github.com/homebridge/homebridge) 
