@@ -15,6 +15,7 @@ const TYPE_THERMO = [
   'Tekmar.tN4_Gateway_482_Zone_-_Slab_Only_CHILD',
   'Tekmar.tN4_Gateway_482_Zone_CHILD',
   'Legrand.MH_HVAC_Control_CHILD',
+  'Vantage.HVAC-IU-Zone_CHILD'
 ];
 
 const TYPE_BLIND = [
@@ -441,6 +442,27 @@ export class VantageInfusion extends EventEmitter {
     return filtered;
   }
 
+  /** Escape text for XML (same as sanitize in index.js). */
+  private static escapeXml(s: string): string {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  }
+
+  /** Build cache XML from readObjects (same structure + sanitization as original index.js). */
+  private buildCacheXml(readObjects: any[]): string {
+    const frag = readObjects.map((o) => {
+      const k = Object.keys(o)[0];
+      const v = o[k];
+      const body = Object.keys(v).map((kk) => `<${kk}>${VantageInfusion.escapeXml(String(v[kk]))}</${kk}>`).join('');
+      return `<Object><${k}>${body}</${k}></Object>`;
+    }).join('');
+    return `<Project><Objects>${frag}</Objects></Project>`;
+  }
+
   private pullConfigurationXml(): Promise<string> {
     return new Promise<string>((resolve) => {
       const finishOnce = (socket: net.Socket | tls.TLSSocket, xml: string) => {
@@ -482,16 +504,7 @@ export class VantageInfusion extends EventEmitter {
         const watchdog = setInterval(() => {
           if ((finishOnce as any)._done) { clearInterval(watchdog); return; }
           if (readObjects.length && Date.now() - lastProgress > 2000) {
-            // Build minimal XML with what we gathered
-            const xml =
-              '<Project><Objects>' +
-              readObjects.map((o) => {
-                const k = Object.keys(o)[0];
-                const v = o[k];
-                const body = Object.keys(v).map((kk) => `<${kk}>${String(v[kk])}</${kk}>`).join('');
-                return `<Object><${k}>${body}</${k}></Object>`;
-              }).join('') +
-              '</Objects></Project>';
+            const xml = this.buildCacheXml(readObjects);
             clearInterval(watchdog);
             finishOnce(socket, xml);
           }
@@ -608,16 +621,7 @@ export class VantageInfusion extends EventEmitter {
   
             // ----- END CONDITION -----
             if (shouldBreak) {
-              const xml =
-                '<Project><Objects>' +
-                readObjects.map((o) => {
-                  const k = Object.keys(o)[0];
-                  const v = o[k];
-                  const body = Object.keys(v).map((kk) => `<${kk}>${String(v[kk])}</${kk}>`).join('');
-                  return `<Object><${k}>${body}</${k}></Object>`;
-                }).join('') +
-                '</Objects></Project>';
-  
+              const xml = this.buildCacheXml(readObjects);
               clearLoginFallback();
               clearInterval(watchdog);
               finishOnce(socket, xml);
@@ -628,15 +632,7 @@ export class VantageInfusion extends EventEmitter {
         socket.on('end', () => {
           this.opts.log.info("ending" + shouldBreak)
           if (!(finishOnce as any)._done && readObjects.length) {
-            const xml =
-              '<Project><Objects>' +
-              readObjects.map((o) => {
-                const k = Object.keys(o)[0];
-                const v = o[k];
-                const body = Object.keys(v).map((kk) => `<${kk}>${String(v[kk])}</${kk}>`).join('');
-                return `<Object><${k}>${body}</${k}></Object>`;
-              }).join('') +
-              '</Objects></Project>';
+            const xml = this.buildCacheXml(readObjects);
             clearLoginFallback();
             clearInterval(watchdog);
             finishOnce(socket, xml);
@@ -646,15 +642,7 @@ export class VantageInfusion extends EventEmitter {
         socket.on('close', () => {
           this.opts.log.debug("closing " + shouldBreak)
           if (!(finishOnce as any)._done && readObjects.length) {
-            const xml =
-              '<Project><Objects>' +
-              readObjects.map((o) => {
-                const k = Object.keys(o)[0];
-                const v = o[k];
-                const body = Object.keys(v).map((kk) => `<${kk}>${String(v[kk])}</${kk}>`).join('');
-                return `<Object><${k}>${body}</${k}></Object>`;
-              }).join('') +
-              '</Objects></Project>';
+            const xml = this.buildCacheXml(readObjects);
             clearLoginFallback();
             clearInterval(watchdog);
             finishOnce(socket, xml);
