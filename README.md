@@ -1,4 +1,5 @@
 # Homebridge Vantage Controls
+[![verified-by-homebridge](https://img.shields.io/badge/homebridge-verified-blueviolet?color=%23491F59&style=flat)](https://github.com/homebridge/homebridge/wiki/Verified-Plugins)
 
 A [Homebridge](https://homebridge.io/) plugin for Vantage Controls InFusion system. 
 This plugin replaces the one sold on smarterhome.io allowing anyone to download on the platform of their choice.
