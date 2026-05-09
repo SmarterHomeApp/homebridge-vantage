@@ -312,6 +312,7 @@ export class VantageInfusion extends EventEmitter {
     const [minVID, maxVID] = rangeStr.split(',').map((x) => Number.parseInt(x, 10));
 
     const blindOpenClose: Record<string, string> = {};
+    const seenNames = new Set<string>();
 
     for (const raw of objects) {
       const key = Object.keys(raw)[0];
@@ -327,6 +328,11 @@ export class VantageInfusion extends EventEmitter {
       let name: string = String(it.DName || it.Name || '');
       if (it.Area && Area[it.Area]?.Name) name = `${Area[it.Area].Name} ${name}`;
       name = name.replace(/-/g, '') || `VID${vid}`;
+      const nameKey = name.toLowerCase();
+      if (seenNames.has(nameKey)) {
+        name = `${name} VID${vid}`;
+      }
+      seenNames.add(name.toLowerCase());
 
       const pushUnique = (dev: VantageDevice) => {
         if (devices.find((d) => d.vid === vid)) return;
