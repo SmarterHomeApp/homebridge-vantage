@@ -1,6 +1,6 @@
 {
   "name": "@smarterhomeapp/homebridge-vantage",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Homebridge plugin for Vantage InFusion (dynamic platform, HB 1.6+ / 2.0 ready)",
   "license": "MIT",
   "keywords": [
@@ -15,7 +15,7 @@
   "homepage": "https://github.com/SmarterHomeApp/homebridge-vantage",
   "repository": {
     "type": "git",
-    "url": "https://github.com/SmarterHomeApp/homebridge-vantage.git"
+    "url": "git+https://github.com/SmarterHomeApp/homebridge-vantage.git"
   },
   "bugs": {
     "url": "https://github.com/SmarterHomeApp/homebridge-vantage/issues"

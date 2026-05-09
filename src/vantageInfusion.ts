@@ -340,7 +340,7 @@ export class VantageInfusion extends EventEmitter {
       };
 
       if (it.DeviceCategory === 'HVAC' || TYPE_THERMO.includes(it.ObjectType)) {
-        this.opts.log.info(`New HVAC added (VID=${it.VID}, Name=${it.Name})`);
+        this.opts.log.info(`New HVAC added (VID=${it.VID}, Name=${name})`);
         pushUnique({
           name,
           address: vid,
@@ -379,7 +379,7 @@ export class VantageInfusion extends EventEmitter {
           it.LoadType === 'High Voltage Relay';
 
         if (isRelay) {
-          this.opts.log.info(`New relay added (VID=${it.VID}, Name=${it.Name}, RELAY)`);
+          this.opts.log.info(`New relay added (VID=${it.VID}, Name=${name}, RELAY)`);
           pushUnique({
             name,
             address: vid,
@@ -391,7 +391,7 @@ export class VantageInfusion extends EventEmitter {
             power: false,
           });
         } else if (it.ObjectType === 'Vantage.DDGColorLoad') {
-          this.opts.log.info(`New load added (VID=${it.VID}, Name=${it.Name}, RGB)`);
+          this.opts.log.info(`New load added (VID=${it.VID}, Name=${name}, RGB)`);
           pushUnique({
             name,
             address: vid,
@@ -405,7 +405,7 @@ export class VantageInfusion extends EventEmitter {
             hue: 0,
           });
         } else {
-          this.opts.log.info(`New load added (VID=${it.VID}, Name=${it.Name}, DIMMER)`);
+          this.opts.log.info(`New load added (VID=${it.VID}, Name=${name}, DIMMER)`);
           pushUnique({
             name,
             address: vid,
@@ -425,7 +425,7 @@ export class VantageInfusion extends EventEmitter {
           blindOpenClose[it.OpenLoad] = it.OpenLoad;
           blindOpenClose[it.CloseLoad] = it.CloseLoad;
         }
-        this.opts.log.info(`New Blind added (VID=${it.VID}, Name=${it.Name}, BLIND)`);
+        this.opts.log.info(`New Blind added (VID=${it.VID}, Name=${name}, BLIND)`);
         pushUnique({ name, address: vid, type: 'blind', vid, objectType: it.ObjectType, pos: 100, posState: 2 });
         continue;
       }

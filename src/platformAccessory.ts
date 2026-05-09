@@ -31,6 +31,7 @@ export class VantagePlatformAccessory {
 
     info.setCharacteristic(this.Characteristic.Manufacturer, 'Vantage Controls');
     info.setCharacteristic(this.Characteristic.Model, device.objectType ?? device.type);
+    info.setCharacteristic(this.Characteristic.Name, device.name);
     info.setCharacteristic(this.Characteristic.SerialNumber, `VID ${device.vid}`);
 
     // Build the correct primary service for the type
@@ -218,6 +219,9 @@ export class VantagePlatformAccessory {
       this.platform.log.warn(`Unsupported device type ${device.type} for ${this.accessory.displayName}`);
       return;
     }
+
+    primary.displayName = device.name;
+    primary.setCharacteristic(this.Characteristic.Name, device.name);
 
     // Mark primary (helps Home app pick the right tile)
     try {
