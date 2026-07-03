@@ -1274,7 +1274,14 @@ class VantageLoad {
 			.setCharacteristic(Characteristic.Model, "Power Switch")
 			.setCharacteristic(Characteristic.SerialNumber, "VID " + this.address);
 
-		this.lightBulbService = new Service.Lightbulb(this.name);
+		if (this.name.toLowerCase().indexOf('fan') != -1 ) {
+            this.lightBulbService = new Service.Fan(this.name);
+            this.lightBulbService.getCharacteristic(Characteristic.RotationSpeed)
+                .setProps({ minValue: 0, maxValue: 100, minStep: 25 });
+            this.type = 'fan';
+        } else {
+            this.lightBulbService = new Service.Lightbulb(this.name);
+        }
 
 		//console.log(this.lightBulbService); //here
 		this.lightBulbService.getCharacteristic(Characteristic.On)
@@ -1294,6 +1301,7 @@ class VantageLoad {
 
 		if (this.type == "dimmer" || this.type == "rgb") {
 			this.lightBulbService.getCharacteristic(Characteristic.Brightness)
+				.setProps({ minValue: 0, maxValue: 100, minStep: 5 })
 				.on('set', (level, callback) => {
 					this.log.debug(sprintf("setBrightness %s = %d", this.address, level));
 					this.bri = parseInt(level);

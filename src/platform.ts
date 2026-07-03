@@ -78,7 +78,7 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       const d = wanted.get(acc.UUID);
       if (d) {
         // Update name/context and re-bind
-        acc.displayName = d.name;
+        acc.displayName = d.name.replace(/[^\w ]/g, '');
         acc.context.device = d;
         new VantagePlatformAccessory(this, acc);
         seen.add(acc.UUID);

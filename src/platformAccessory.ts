@@ -50,8 +50,34 @@ export class VantagePlatformAccessory {
       // Category helps iOS
       this.accessory.category = this.platform.api.hap.Categories.SWITCH;
     }
+  
+    if (this.accessory.displayName.toLowerCase().indexOf('fan') != -1 ) {
+      primary =
+        this.accessory.getService(this.Service.Fan) ??
+        this.accessory.addService(this.Service.Fan, this.accessory.displayName);
+        //console.log('made a fan');
 
-    if (device.type === 'dimmer' || device.type === 'rgb') {
+        const on = primary.getCharacteristic(this.Characteristic.On);
+        on.removeAllListeners('set');
+        on.onSet(async (value) => {
+          (device as any).power = !!value;
+          if ((device as any).power && (device as any).bri === 0) {
+            (device as any).bri = 100;
+          }
+          const level = (device as any).power ? (device as any).bri : 0;
+          this.platform.getInfusion().setBrightness(device.address, level);
+        });
+
+        const rotationSpeed = primary.getCharacteristic(this.Characteristic.RotationSpeed);
+        rotationSpeed.setProps({ minValue: 0, maxValue: 100, minStep: 25 });
+        rotationSpeed.removeAllListeners('set');
+        rotationSpeed.onSet(async (value) => {
+          (device as any).bri = Number(value);
+          (device as any).power = (device as any).bri > 0;
+          this.platform.getInfusion().setBrightness(device.address, (device as any).bri);
+        });
+
+        } else if (device.type === 'dimmer' || device.type === 'rgb') {
       primary =
         this.accessory.getService(this.Service.Lightbulb) ??
         this.accessory.addService(this.Service.Lightbulb, this.accessory.displayName);

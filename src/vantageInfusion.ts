@@ -327,7 +327,7 @@ export class VantageInfusion extends EventEmitter {
       // Normalized name (Area + Name, dedup with VID suffix)
       let name: string = String(it.DName || it.Name || '');
       if (it.Area && Area[it.Area]?.Name) name = `${Area[it.Area].Name} ${name}`;
-      name = name.replace(/-/g, '') || `VID${vid}`;
+      name = name.replace(/[^\w ]/g, '') || `VID${vid}`;
       const nameKey = name.toLowerCase();
       if (seenNames.has(nameKey)) {
         name = `${name} VID${vid}`;
