@@ -74,6 +74,7 @@ export class VantageInfusion extends EventEmitter {
   
   private getPersistentCachePath(): string {
     const fileName = `vantage-${this.cacheKeyForIp(this.opts.ipaddress)}.dc`;
+    // Controller-level cache is intentionally not range-specific; range-split main/child bridge instances share it.
     return path.join(this.getPersistentCacheDirectory(), fileName);
   }
 
@@ -91,6 +92,7 @@ export class VantageInfusion extends EventEmitter {
 
   constructor(private readonly opts: Options) {
     super();
+    this.opts.log.debug(`Persistent Vantage cache path: ${this.getPersistentCachePath()}`);
   }
 
   /** Probe ports and open command session */

@@ -101,7 +101,7 @@ npm run build
 
 4. Link for development:
 ```bash
-npm run dev
+npm link
 ```
 
 ## Troubleshooting
