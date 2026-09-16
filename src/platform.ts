@@ -66,9 +66,30 @@ export class VantagePlatform implements DynamicPlatformPlugin {
   private async syncAccessories(devices: VantageDevice[]) {
     const uuidFor = (d: VantageDevice) => this.api.hap.uuid.generate(String(d.vid));
 
+    if (devices.length === 0 && this.accessories.length > 0) {
+      this.log.error(
+        `Discovery returned 0 devices while ${this.accessories.length} cached accessories exist. ` +
+          'Preserving cached accessories and skipping reconciliation.',
+      );
+      this.syncedOnce = true;
+      this.wireRealtimeListeners();
+      return;
+    }
+
     // Map current devices
     const wanted = new Map<string, VantageDevice>();
     for (const d of devices) wanted.set(uuidFor(d), d);
+
+    const toUnregister = this.accessories.filter((acc) => !wanted.has(acc.UUID));
+    if (toUnregister.length && this.shouldSkipStaleRemoval(devices.length, toUnregister.length)) {
+      this.log.error(
+        `Discovery returned ${devices.length} devices while ${this.accessories.length} cached accessories exist. ` +
+          `Preserving ${toUnregister.length} apparently stale accessories and skipping reconciliation for safety.`,
+      );
+      this.syncedOnce = true;
+      this.wireRealtimeListeners();
+      return;
+    }
 
     // Update existing / mark seen
     const seen = new Set<string>();
@@ -113,10 +134,9 @@ export class VantagePlatform implements DynamicPlatformPlugin {
     }
 
     // Unregister stale
-    const toUnregister = this.accessories.filter((acc) => !wanted.has(acc.UUID));
     if (toUnregister.length) {
       this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, toUnregister);
-      this.log.info(`Unregistered ${toUnregister.length} stale accessories`);
+      this.log.info(`Unregistered ${toUnregister.length} stale accessories after successful discovery`);
       // Remove from local cache & VID map
       for (const acc of toUnregister) {
         const vid = acc?.context?.device?.vid;
@@ -130,6 +150,17 @@ export class VantagePlatform implements DynamicPlatformPlugin {
     this.wireRealtimeListeners();
 
     this.syncedOnce = true;
+  }
+
+  private shouldSkipStaleRemoval(discoveredCount: number, staleCount: number): boolean {
+    const cachedCount = this.accessories.length;
+    if (cachedCount === 0 || staleCount === 0) return false;
+
+    const removalRatio = staleCount / cachedCount;
+    const discoveredRatio = discoveredCount / cachedCount;
+
+    // Allow normal small cleanup, but refuse sudden large drops that look like partial discovery.
+    return cachedCount >= 20 && staleCount >= 10 && removalRatio > 0.5 && discoveredRatio < 0.5;
   }
 
   private wireRealtimeListeners() {

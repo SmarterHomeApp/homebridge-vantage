@@ -41,6 +41,8 @@ const OBJECT_TYPES = [
   ...TYPE_BLIND,
 ];
 
+const DISCOVERABLE_OBJECT_TYPES = OBJECT_TYPES.filter((type) => type !== 'Area');
+
 interface Options {
   ipaddress: string;
   username: string;
@@ -52,6 +54,11 @@ interface Options {
   forceSSL?: boolean;
 }
 
+interface ValidatedConfiguration {
+  objects: any[];
+  relevantObjectCount: number;
+}
+
 export class VantageInfusion extends EventEmitter {
   private readonly xml = new Parser({ explicitArray: false, mergeAttrs: true, trim: true });
   private command!: net.Socket | tls.TLSSocket;
@@ -59,12 +66,17 @@ export class VantageInfusion extends EventEmitter {
   private isInsecureCfg = true; // 2001 vs 2010
   
   private getCacheFilePath(): string {
-    // Try /tmp first (Linux/macOS), then fall back to user's home directory
-    const tmpPath = '/tmp/vantage.dc';
+    const fileName = `vantage-${this.cacheKeyForIp(this.opts.ipaddress)}.dc`;
+    // Try /tmp first (Linux/macOS), then fall back to user's home directory.
+    const tmpPath = path.join('/tmp', fileName);
     if (fs.existsSync('/tmp')) {
       return tmpPath;
     }
-    return path.join(os.homedir(), 'vantage.dc');
+    return path.join(os.homedir(), fileName);
+  }
+
+  private cacheKeyForIp(ipaddress: string): string {
+    return ipaddress.replace(/[^a-zA-Z0-9.-]/g, '_');
   }
 
   constructor(private readonly opts: Options) {
@@ -279,10 +291,11 @@ export class VantageInfusion extends EventEmitter {
       if (fs.existsSync(cachePath)) {
         try {
           const cachedXml = fs.readFileSync(cachePath, 'utf8');
-          this.opts.log.info(`Using cached configuration from ${cachePath}`);
-          return this.processConfigurationXml(cachedXml);
+          const devices = await this.processConfigurationXml(cachedXml, `cached configuration from ${cachePath}`);
+          this.opts.log.info(`Valid cached configuration loaded from ${cachePath}`);
+          return devices;
         } catch (error) {
-          this.opts.log.warn(`Failed to read cached configuration: ${error}`);
+          this.opts.log.warn(`Cached configuration rejected from ${cachePath}: ${this.errorMessage(error)}`);
         }
       }
     }
@@ -291,15 +304,14 @@ export class VantageInfusion extends EventEmitter {
     // Legacy: "end configuration download"
     this.opts.log.debug('VantagePlatform for InFusion Controller (end configuration download)');
     
-    return this.processConfigurationXml(xml);
+    const devices = await this.processConfigurationXml(xml, 'downloaded configuration');
+    this.opts.log.info('Valid configuration loaded from controller download');
+    return devices;
   }
   
-  private async processConfigurationXml(xml: string): Promise<VantageDevice[]> {
-    const sanitized = this.sanitizeXml(xml);
-    const parsed = await this.xml.parseStringPromise(sanitized).catch(() => ({} as any));
+  private async processConfigurationXml(xml: string, source = 'configuration'): Promise<VantageDevice[]> {
+    const { objects } = await this.parseAndValidateConfigurationXml(xml, source);
     const devices: VantageDevice[] = [];
-
-    const objects: any[] = parsed?.Project?.Objects?.Object || [];
 
     const Areas = objects.filter((el: any) => Object.keys(el)[0] === 'Area');
     const Area: Record<string, any> = {};
@@ -448,6 +460,59 @@ export class VantageInfusion extends EventEmitter {
     return filtered;
   }
 
+  private async parseAndValidateConfigurationXml(xml: string, source: string): Promise<ValidatedConfiguration> {
+    const sanitized = this.sanitizeXml(xml);
+    let parsedAny: any;
+
+    try {
+      parsedAny = await this.xml.parseStringPromise(sanitized);
+    } catch (error) {
+      const message = `${source} rejected: XML parsing failed: ${this.errorMessage(error)}`;
+      this.opts.log.error(message);
+      throw new Error(message);
+    }
+
+    const parsed = parsedAny?.smarterHome ?? parsedAny;
+    const objectNode = parsed?.Project?.Objects?.Object;
+    if (!objectNode) {
+      const message = `${source} rejected: missing Project.Objects.Object configuration structure`;
+      this.opts.log.error(message);
+      throw new Error(message);
+    }
+
+    const objects = Array.isArray(objectNode) ? objectNode : [objectNode];
+    if (objects.length === 0) {
+      const message = `${source} rejected: Project.Objects.Object contains no objects`;
+      this.opts.log.error(message);
+      throw new Error(message);
+    }
+
+    const relevantObjectCount = objects.filter((object) => this.isRelevantConfigObject(object)).length;
+    if (relevantObjectCount === 0) {
+      const message = `${source} rejected: configuration contains no discoverable Vantage objects`;
+      this.opts.log.error(message);
+      throw new Error(message);
+    }
+
+    return { objects, relevantObjectCount };
+  }
+
+  private isRelevantConfigObject(raw: any): boolean {
+    if (!raw || typeof raw !== 'object') return false;
+
+    const key = Object.keys(raw)[0];
+    const value = raw[key];
+    if (!value || typeof value !== 'object') return false;
+
+    const objectType = value?.ObjectType ?? key;
+
+    return DISCOVERABLE_OBJECT_TYPES.includes(key) || DISCOVERABLE_OBJECT_TYPES.includes(objectType);
+  }
+
+  private errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
   /** Escape text for XML (same as sanitize in index.js). */
   private static escapeXml(s: string): string {
     return String(s)
@@ -470,28 +535,28 @@ export class VantageInfusion extends EventEmitter {
   }
 
   private pullConfigurationXml(): Promise<string> {
-    return new Promise<string>((resolve) => {
-      const finishOnce = (socket: net.Socket | tls.TLSSocket, xml: string) => {
+    return new Promise<string>((resolve, reject) => {
+      const finishOnce = async (socket: net.Socket | tls.TLSSocket, xml: string) => {
         if ((finishOnce as any)._done) return;
         (finishOnce as any)._done = true;
   
         // Save configuration to cache if usecache is enabled
-        if (this.opts.usecache) {
-          try {
-            const cachePath = this.getCacheFilePath();
-            fs.writeFileSync(cachePath, xml);
-            this.opts.log.info(`Configuration cached to ${cachePath}`);
-          } catch (error) {
-            this.opts.log.warn(`Failed to cache configuration: ${error}`);
+        try {
+          if (this.opts.usecache) {
+            await this.writeCacheAtomically(xml);
           }
+  
+          // legacy log + event
+          this.opts.log.debug('VantagePlatform for InFusion Controller (end configuration download)');
+          this.emit('endDownloadConfiguration', xml);
+  
+          try { socket.destroy(); } catch { /* noop */ }
+          resolve(xml);
+        } catch (error) {
+          this.opts.log.error(`Downloaded configuration rejected; preserving existing cache: ${this.errorMessage(error)}`);
+          try { socket.destroy(); } catch { /* noop */ }
+          reject(error);
         }
-  
-        // legacy log + event
-        this.opts.log.debug('VantagePlatform for InFusion Controller (end configuration download)');
-        this.emit('endDownloadConfiguration', xml);
-  
-        try { socket.destroy(); } catch { /* noop */ }
-        resolve(xml);
       };
   
       const onData = (socket: net.Socket | tls.TLSSocket) => {
@@ -512,7 +577,7 @@ export class VantageInfusion extends EventEmitter {
           if (readObjects.length && Date.now() - lastProgress > 2000) {
             const xml = this.buildCacheXml(readObjects);
             clearInterval(watchdog);
-            finishOnce(socket, xml);
+            void finishOnce(socket, xml);
           }
         }, 750);
   
@@ -630,7 +695,7 @@ export class VantageInfusion extends EventEmitter {
               const xml = this.buildCacheXml(readObjects);
               clearLoginFallback();
               clearInterval(watchdog);
-              finishOnce(socket, xml);
+              void finishOnce(socket, xml);
             }
           });
         });
@@ -641,7 +706,7 @@ export class VantageInfusion extends EventEmitter {
             const xml = this.buildCacheXml(readObjects);
             clearLoginFallback();
             clearInterval(watchdog);
-            finishOnce(socket, xml);
+            void finishOnce(socket, xml);
           }
         });
   
@@ -651,7 +716,7 @@ export class VantageInfusion extends EventEmitter {
             const xml = this.buildCacheXml(readObjects);
             clearLoginFallback();
             clearInterval(watchdog);
-            finishOnce(socket, xml);
+            void finishOnce(socket, xml);
           }
         });
       };
@@ -667,6 +732,30 @@ export class VantageInfusion extends EventEmitter {
         );
       }
     });
+  }
+
+  private async writeCacheAtomically(xml: string) {
+    const cachePath = this.getCacheFilePath();
+    const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+
+    await this.parseAndValidateConfigurationXml(xml, 'downloaded configuration');
+
+    try {
+      fs.writeFileSync(tmpPath, xml, 'utf8');
+      const tmpXml = fs.readFileSync(tmpPath, 'utf8');
+      const validation = await this.parseAndValidateConfigurationXml(tmpXml, `temporary cache ${tmpPath}`);
+      fs.renameSync(tmpPath, cachePath);
+      this.opts.log.info(
+        `Downloaded configuration accepted with ${validation.relevantObjectCount} relevant objects; cached to ${cachePath}`,
+      );
+    } catch (error) {
+      try {
+        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      } catch {
+        /* preserve original error */
+      }
+      throw error;
+    }
   }
 
   
