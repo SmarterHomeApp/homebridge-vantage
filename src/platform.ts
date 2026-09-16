@@ -68,11 +68,12 @@ export class VantagePlatform implements DynamicPlatformPlugin {
 
     if (devices.length === 0 && this.accessories.length > 0) {
       this.log.error(
-        `Discovery returned 0 devices while ${this.accessories.length} cached accessories exist. ` +
-          'Preserving cached accessories and skipping reconciliation.',
+        `Discovery returned 0 devices; preserving ${this.accessories.length} cached accessories ` +
+          'and rebuilding realtime VID map.',
       );
-      this.syncedOnce = true;
+      this.rebuildAccessoryVidMap();
       this.wireRealtimeListeners();
+      this.syncedOnce = true;
       return;
     }
 
@@ -83,11 +84,12 @@ export class VantagePlatform implements DynamicPlatformPlugin {
     const toUnregister = this.accessories.filter((acc) => !wanted.has(acc.UUID));
     if (toUnregister.length && this.shouldSkipStaleRemoval(devices.length, toUnregister.length)) {
       this.log.error(
-        `Discovery returned ${devices.length} devices while ${this.accessories.length} cached accessories exist. ` +
-          `Preserving ${toUnregister.length} apparently stale accessories and skipping reconciliation for safety.`,
+        `Suspicious partial discovery detected; preserving ${this.accessories.length} cached accessories. ` +
+          `Discovery returned ${devices.length} devices and would remove ${toUnregister.length}.`,
       );
-      this.syncedOnce = true;
+      this.rebuildAccessoryVidMap();
       this.wireRealtimeListeners();
+      this.syncedOnce = true;
       return;
     }
 
@@ -159,8 +161,20 @@ export class VantagePlatform implements DynamicPlatformPlugin {
     const removalRatio = staleCount / cachedCount;
     const discoveredRatio = discoveredCount / cachedCount;
 
-    // Allow normal small cleanup, but refuse sudden large drops that look like partial discovery.
-    return cachedCount >= 20 && staleCount >= 10 && removalRatio > 0.5 && discoveredRatio < 0.5;
+    // Allow small cleanup, but refuse sudden large percentage drops that look like partial discovery.
+    return staleCount >= 5 && removalRatio > 0.5 && discoveredRatio < 0.5;
+  }
+
+  private rebuildAccessoryVidMap() {
+    this.accessoriesByVid.clear();
+
+    for (const acc of this.accessories) {
+      const vid = acc?.context?.device?.vid;
+
+      if (vid !== undefined && vid !== null) {
+        this.accessoriesByVid.set(String(vid), acc);
+      }
+    }
   }
 
   private wireRealtimeListeners() {

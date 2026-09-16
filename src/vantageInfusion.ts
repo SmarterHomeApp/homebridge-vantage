@@ -736,17 +736,34 @@ export class VantageInfusion extends EventEmitter {
 
   private async writeCacheAtomically(xml: string) {
     const cachePath = this.getCacheFilePath();
-    const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+    const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
 
-    await this.parseAndValidateConfigurationXml(xml, 'downloaded configuration');
+    const candidateValidation = await this.parseAndValidateConfigurationXml(xml, 'downloaded configuration');
 
     try {
       fs.writeFileSync(tmpPath, xml, 'utf8');
       const tmpXml = fs.readFileSync(tmpPath, 'utf8');
       const validation = await this.parseAndValidateConfigurationXml(tmpXml, `temporary cache ${tmpPath}`);
+
+      if (fs.existsSync(cachePath)) {
+        const existingValidation = await this.validateExistingCacheForReplacement(cachePath);
+        if (
+          existingValidation &&
+          existingValidation.relevantObjectCount >= 20 &&
+          candidateValidation.relevantObjectCount < existingValidation.relevantObjectCount * 0.5
+        ) {
+          const message =
+            `Downloaded configuration rejected as incomplete: ${candidateValidation.relevantObjectCount} relevant objects ` +
+            `vs ${existingValidation.relevantObjectCount} in existing cache.`;
+          this.opts.log.error(message);
+          throw new Error(message);
+        }
+      }
+
       fs.renameSync(tmpPath, cachePath);
       this.opts.log.info(
-        `Downloaded configuration accepted with ${validation.relevantObjectCount} relevant objects; cached to ${cachePath}`,
+        `Validated controller configuration accepted and cache replaced atomically at ${cachePath} ` +
+          `(${validation.relevantObjectCount} relevant objects).`,
       );
     } catch (error) {
       try {
@@ -755,6 +772,18 @@ export class VantageInfusion extends EventEmitter {
         /* preserve original error */
       }
       throw error;
+    }
+  }
+
+  private async validateExistingCacheForReplacement(cachePath: string): Promise<ValidatedConfiguration | undefined> {
+    try {
+      const existingXml = fs.readFileSync(cachePath, 'utf8');
+      return await this.parseAndValidateConfigurationXml(existingXml, `existing cache ${cachePath}`);
+    } catch (error) {
+      this.opts.log.warn(
+        `Existing cache is invalid; replacing it with validated controller configuration: ${this.errorMessage(error)}`,
+      );
+      return undefined;
     }
   }
 
