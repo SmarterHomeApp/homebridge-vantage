@@ -39,6 +39,7 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       omit: (config as any).omit ?? '',
       range: (config as any).range ?? '0,999999999',
       forceSSL: (config as any).forceSSL ?? false,
+      storagePath: this.api.user.storagePath(),
       log: this.log,
     });
 

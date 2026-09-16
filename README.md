@@ -12,6 +12,7 @@ This plugin replaces the one sold on smarterhome.io allowing anyone to download 
 - **Real-time Updates**: Live status updates from your InFusion controller
 - **SSL Support**: Secure connections to your controller
 - **Device Filtering**: Include/exclude specific devices by VID range
+- **Safe Configuration Cache**: Downloads fresh controller configuration on every startup while keeping a persistent last-known-good fallback
 
 ## Installation
 
@@ -52,9 +53,17 @@ npm install -g @smarterhomeapp/homebridge-vantage
 | `ipaddress` | string | Yes | IP address of your InFusion controller |
 | `username` | string | No | Username for authentication |
 | `password` | string | No | Password for authentication |
-| `usecache` | boolean | No | Use cached configuration (default: true) |
+| `usecache` | boolean | No | Maintain a persistent last-known-good configuration fallback while still attempting fresh controller discovery on every startup (default: true) |
 | `omit` | string | No | Comma-separated list of VIDs to exclude |
 | `range` | string | No | Comma-separated VID range (min,max) |
+
+## Configuration Discovery and Cache
+
+On each Homebridge startup, the plugin first attempts to download the current Vantage controller configuration. If the downloaded configuration is valid and complete, it is used immediately and saved atomically as the persistent last-known-good configuration.
+
+When `usecache` is enabled, the persistent cache is only a fallback. If the controller is offline, returns malformed XML, returns an empty configuration, or returns a suspiciously incomplete configuration, the plugin preserves the existing cache and uses the last-known-good configuration instead.
+
+The cache is stored under Homebridge's configured storage directory in a plugin-specific `vantage` folder. Cache filenames are keyed by controller IP, for example `vantage-10.0.0.100.dc`, so multiple platform instances using different VID ranges for the same controller share one full-controller cache. Restarts naturally pick up controller/DC changes; users do not need to manually clear the cache.
 
 ## Supported Devices
 
@@ -109,7 +118,7 @@ npm run dev
 
 ### Performance Issues
 - Reduce the number of devices by using the `omit` parameter
-- Disable cache if configuration changes frequently
+- Restart Homebridge to force a fresh controller configuration download
 - Consider using device ranges to limit discovery
 
 ## License

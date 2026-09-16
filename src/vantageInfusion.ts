@@ -4,7 +4,6 @@ import * as tls from 'tls';
 import { Parser } from 'xml2js';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import type { Logger } from 'homebridge';
 import type { VantageDevice } from './types';
 
@@ -51,6 +50,7 @@ interface Options {
   omit: string;
   range: string;
   log: Logger;
+  storagePath: string;
   forceSSL?: boolean;
 }
 
@@ -59,20 +59,30 @@ interface ValidatedConfiguration {
   relevantObjectCount: number;
 }
 
+class CandidateConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CandidateConfigurationError';
+  }
+}
+
 export class VantageInfusion extends EventEmitter {
   private readonly xml = new Parser({ explicitArray: false, mergeAttrs: true, trim: true });
   private command!: net.Socket | tls.TLSSocket;
   private isInsecureCmd = true; // 3001 vs 3010
   private isInsecureCfg = true; // 2001 vs 2010
   
-  private getCacheFilePath(): string {
+  private getPersistentCachePath(): string {
     const fileName = `vantage-${this.cacheKeyForIp(this.opts.ipaddress)}.dc`;
-    // Try /tmp first (Linux/macOS), then fall back to user's home directory.
-    const tmpPath = path.join('/tmp', fileName);
-    if (fs.existsSync('/tmp')) {
-      return tmpPath;
-    }
-    return path.join(os.homedir(), fileName);
+    return path.join(this.getPersistentCacheDirectory(), fileName);
+  }
+
+  private getPersistentCacheDirectory(): string {
+    return path.join(this.opts.storagePath, 'vantage');
+  }
+
+  private getLegacyCachePaths(): string[] {
+    return [path.join('/tmp', `vantage-${this.cacheKeyForIp(this.opts.ipaddress)}.dc`)];
   }
 
   private cacheKeyForIp(ipaddress: string): string {
@@ -285,28 +295,48 @@ export class VantageInfusion extends EventEmitter {
   }
   /** XML/config discovery; returns devices (replaces old Discover/DiscoverSSL) */
   async discoverDevices(): Promise<VantageDevice[]> {
-    // Check for cached configuration first
     if (this.opts.usecache) {
-      const cachePath = this.getCacheFilePath();
-      if (fs.existsSync(cachePath)) {
+      await this.migrateLegacyCacheIfNeeded();
+    }
+
+    try {
+      this.opts.log.info(`Attempting fresh Vantage configuration download from ${this.opts.ipaddress}`);
+      const xml = await this.pullConfigurationXml();
+      const validation = await this.parseAndValidateConfigurationXml(xml, 'downloaded configuration');
+      this.opts.log.info(
+        `Fresh Vantage controller configuration validated successfully (${validation.relevantObjectCount} relevant objects)`,
+      );
+
+      if (this.opts.usecache) {
         try {
-          const cachedXml = fs.readFileSync(cachePath, 'utf8');
-          const devices = await this.processConfigurationXml(cachedXml, `cached configuration from ${cachePath}`);
-          this.opts.log.info(`Valid cached configuration loaded from ${cachePath}`);
-          return devices;
+          await this.writePersistentCacheAtomically(xml, validation);
         } catch (error) {
-          this.opts.log.warn(`Cached configuration rejected from ${cachePath}: ${this.errorMessage(error)}`);
+          if (error instanceof CandidateConfigurationError) {
+            throw error;
+          }
+          this.opts.log.warn(`Persistent cache update failed; using live configuration for this run: ${this.errorMessage(error)}`);
         }
       }
+
+      // Legacy: "end configuration download"
+      this.opts.log.debug('VantagePlatform for InFusion Controller (end configuration download)');
+
+      const devices = await this.processConfigurationXml(xml, 'downloaded configuration');
+      this.opts.log.info('Fresh Vantage controller configuration loaded successfully');
+      return devices;
+    } catch (error) {
+      this.opts.log.warn(`Fresh controller discovery failed; attempting persistent fallback cache: ${this.errorMessage(error)}`);
+
+      if (this.opts.usecache) {
+        try {
+          return await this.loadPersistentCache();
+        } catch (cacheError) {
+          this.opts.log.error(`Persistent cache unavailable; preserving existing Homebridge accessories: ${this.errorMessage(cacheError)}`);
+        }
+      }
+
+      throw error;
     }
-    
-    const xml = await this.pullConfigurationXml();
-    // Legacy: "end configuration download"
-    this.opts.log.debug('VantagePlatform for InFusion Controller (end configuration download)');
-    
-    const devices = await this.processConfigurationXml(xml, 'downloaded configuration');
-    this.opts.log.info('Valid configuration loaded from controller download');
-    return devices;
   }
   
   private async processConfigurationXml(xml: string, source = 'configuration'): Promise<VantageDevice[]> {
@@ -513,6 +543,44 @@ export class VantageInfusion extends EventEmitter {
     return error instanceof Error ? error.message : String(error);
   }
 
+  private async loadPersistentCache(): Promise<VantageDevice[]> {
+    const cachePath = this.getPersistentCachePath();
+    if (!fs.existsSync(cachePath)) {
+      throw new Error(`persistent cache not found at ${cachePath}`);
+    }
+
+    const cachedXml = fs.readFileSync(cachePath, 'utf8');
+    const devices = await this.processConfigurationXml(cachedXml, `persistent last-known-good cache ${cachePath}`);
+    this.opts.log.warn(`Using persistent last-known-good Vantage configuration from ${cachePath}`);
+    return devices;
+  }
+
+  private async migrateLegacyCacheIfNeeded() {
+    const persistentCachePath = this.getPersistentCachePath();
+    if (fs.existsSync(persistentCachePath)) return;
+
+    for (const legacyPath of this.getLegacyCachePaths()) {
+      if (!fs.existsSync(legacyPath)) continue;
+
+      try {
+        const legacyXml = fs.readFileSync(legacyPath, 'utf8');
+        const validation = await this.parseAndValidateConfigurationXml(legacyXml, `legacy cache ${legacyPath}`);
+        await this.writePersistentCacheAtomically(legacyXml, validation);
+        this.opts.log.info(`Migrated legacy Vantage cache from ${legacyPath} to ${persistentCachePath}`);
+        return;
+      } catch (error) {
+        this.opts.log.warn(`Legacy cache rejected from ${legacyPath}: ${this.errorMessage(error)}`);
+      }
+    }
+
+    const unkeyedLegacyPath = path.join('/tmp', 'vantage.dc');
+    if (fs.existsSync(unkeyedLegacyPath)) {
+      this.opts.log.warn(
+        `Legacy cache ${unkeyedLegacyPath} exists but was not migrated because it is not controller-specific.`,
+      );
+    }
+  }
+
   /** Escape text for XML (same as sanitize in index.js). */
   private static escapeXml(s: string): string {
     return String(s)
@@ -536,27 +604,22 @@ export class VantageInfusion extends EventEmitter {
 
   private pullConfigurationXml(): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-      const finishOnce = async (socket: net.Socket | tls.TLSSocket, xml: string) => {
+      const finishOnce = (socket: net.Socket | tls.TLSSocket, xml: string) => {
         if ((finishOnce as any)._done) return;
         (finishOnce as any)._done = true;
-  
-        // Save configuration to cache if usecache is enabled
-        try {
-          if (this.opts.usecache) {
-            await this.writeCacheAtomically(xml);
-          }
-  
-          // legacy log + event
-          this.opts.log.debug('VantagePlatform for InFusion Controller (end configuration download)');
-          this.emit('endDownloadConfiguration', xml);
-  
-          try { socket.destroy(); } catch { /* noop */ }
-          resolve(xml);
-        } catch (error) {
-          this.opts.log.error(`Downloaded configuration rejected; preserving existing cache: ${this.errorMessage(error)}`);
-          try { socket.destroy(); } catch { /* noop */ }
-          reject(error);
-        }
+
+        // legacy event
+        this.emit('endDownloadConfiguration', xml);
+
+        try { socket.destroy(); } catch { /* noop */ }
+        resolve(xml);
+      };
+
+      const failOnce = (socket: net.Socket | tls.TLSSocket, error: unknown) => {
+        if ((finishOnce as any)._done) return;
+        (finishOnce as any)._done = true;
+        try { socket.destroy(); } catch { /* noop */ }
+        reject(error);
       };
   
       const onData = (socket: net.Socket | tls.TLSSocket) => {
@@ -577,7 +640,7 @@ export class VantageInfusion extends EventEmitter {
           if (readObjects.length && Date.now() - lastProgress > 2000) {
             const xml = this.buildCacheXml(readObjects);
             clearInterval(watchdog);
-            void finishOnce(socket, xml);
+            finishOnce(socket, xml);
           }
         }, 750);
   
@@ -695,34 +758,60 @@ export class VantageInfusion extends EventEmitter {
               const xml = this.buildCacheXml(readObjects);
               clearLoginFallback();
               clearInterval(watchdog);
-              void finishOnce(socket, xml);
+              finishOnce(socket, xml);
             }
           });
         });
   
         socket.on('end', () => {
           this.opts.log.info("ending" + shouldBreak)
+          if ((finishOnce as any)._done) return;
           if (!(finishOnce as any)._done && readObjects.length) {
             const xml = this.buildCacheXml(readObjects);
             clearLoginFallback();
             clearInterval(watchdog);
-            void finishOnce(socket, xml);
+            finishOnce(socket, xml);
+          } else {
+            clearLoginFallback();
+            clearInterval(watchdog);
+            failOnce(socket, new Error('Connection ended before Vantage configuration was downloaded'));
           }
         });
   
         socket.on('close', () => {
           this.opts.log.debug("closing " + shouldBreak)
+          if ((finishOnce as any)._done) return;
           if (!(finishOnce as any)._done && readObjects.length) {
             const xml = this.buildCacheXml(readObjects);
             clearLoginFallback();
             clearInterval(watchdog);
-            void finishOnce(socket, xml);
+            finishOnce(socket, xml);
+          } else {
+            clearLoginFallback();
+            clearInterval(watchdog);
+            failOnce(socket, new Error('Connection closed before Vantage configuration was downloaded'));
           }
         });
+
+        socket.on('timeout', () => {
+          clearLoginFallback();
+          clearInterval(watchdog);
+          failOnce(socket, new Error('Timed out while downloading Vantage configuration'));
+        });
+
+        socket.on('error', (error) => {
+          clearLoginFallback();
+          clearInterval(watchdog);
+          failOnce(socket, error);
+        });
+
+        socket.setTimeout(30000);
       };
   
       if (this.isInsecureCfg) {
         const s = net.connect({ host: this.opts.ipaddress, port: 2001 }, () => onData(s));
+        s.once('error', (error) => failOnce(s, error));
+        s.setTimeout(30000, () => failOnce(s, new Error('Timed out connecting to Vantage configuration port')));
       } else {
         const s = tls.connect(
           2010,
@@ -730,39 +819,28 @@ export class VantageInfusion extends EventEmitter {
           { rejectUnauthorized: false, requestCert: true },
           () => onData(s),
         );
+        s.once('error', (error) => failOnce(s, error));
+        s.setTimeout(30000, () => failOnce(s, new Error('Timed out connecting to Vantage configuration port')));
       }
     });
   }
 
-  private async writeCacheAtomically(xml: string) {
-    const cachePath = this.getCacheFilePath();
+  private async writePersistentCacheAtomically(xml: string, candidateValidation: ValidatedConfiguration) {
+    const cachePath = this.getPersistentCachePath();
     const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
 
-    const candidateValidation = await this.parseAndValidateConfigurationXml(xml, 'downloaded configuration');
+    await this.validateCandidateAgainstExistingCache(cachePath, candidateValidation);
 
     try {
+      fs.mkdirSync(this.getPersistentCacheDirectory(), { recursive: true });
       fs.writeFileSync(tmpPath, xml, 'utf8');
       const tmpXml = fs.readFileSync(tmpPath, 'utf8');
       const validation = await this.parseAndValidateConfigurationXml(tmpXml, `temporary cache ${tmpPath}`);
-
-      if (fs.existsSync(cachePath)) {
-        const existingValidation = await this.validateExistingCacheForReplacement(cachePath);
-        if (
-          existingValidation &&
-          existingValidation.relevantObjectCount >= 20 &&
-          candidateValidation.relevantObjectCount < existingValidation.relevantObjectCount * 0.5
-        ) {
-          const message =
-            `Downloaded configuration rejected as incomplete: ${candidateValidation.relevantObjectCount} relevant objects ` +
-            `vs ${existingValidation.relevantObjectCount} in existing cache.`;
-          this.opts.log.error(message);
-          throw new Error(message);
-        }
-      }
+      await this.validateCandidateAgainstExistingCache(cachePath, validation);
 
       fs.renameSync(tmpPath, cachePath);
       this.opts.log.info(
-        `Validated controller configuration accepted and cache replaced atomically at ${cachePath} ` +
+        `Validated controller configuration accepted and persistent cache updated atomically at ${cachePath} ` +
           `(${validation.relevantObjectCount} relevant objects).`,
       );
     } catch (error) {
@@ -772,6 +850,26 @@ export class VantageInfusion extends EventEmitter {
         /* preserve original error */
       }
       throw error;
+    }
+  }
+
+  private async validateCandidateAgainstExistingCache(
+    cachePath: string,
+    candidateValidation: ValidatedConfiguration,
+  ) {
+    if (!fs.existsSync(cachePath)) return;
+
+    const existingValidation = await this.validateExistingCacheForReplacement(cachePath);
+    if (
+      existingValidation &&
+      existingValidation.relevantObjectCount >= 20 &&
+      candidateValidation.relevantObjectCount < existingValidation.relevantObjectCount * 0.5
+    ) {
+      const message =
+        `Downloaded configuration rejected as incomplete: ${candidateValidation.relevantObjectCount} relevant objects ` +
+        `vs ${existingValidation.relevantObjectCount} in persistent cache.`;
+      this.opts.log.error(message);
+      throw new CandidateConfigurationError(message);
     }
   }
 
