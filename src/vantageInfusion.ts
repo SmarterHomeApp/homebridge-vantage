@@ -318,6 +318,8 @@ export class VantageInfusion extends EventEmitter {
           }
           this.opts.log.warn(`Persistent cache update failed; using live configuration for this run: ${this.errorMessage(error)}`);
         }
+
+        await this.writeLegacyTmpCacheMirror(xml, validation);
       }
 
       // Legacy: "end configuration download"
@@ -852,6 +854,33 @@ export class VantageInfusion extends EventEmitter {
         /* preserve original error */
       }
       throw error;
+    }
+  }
+
+  private async writeLegacyTmpCacheMirror(xml: string, candidateValidation: ValidatedConfiguration) {
+    const cachePath = path.join('/tmp', 'vantage.dc');
+    const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+
+    try {
+      fs.writeFileSync(tmpPath, xml, 'utf8');
+      const tmpXml = fs.readFileSync(tmpPath, 'utf8');
+      const validation = await this.parseAndValidateConfigurationXml(tmpXml, `legacy temporary cache mirror ${tmpPath}`);
+      if (validation.relevantObjectCount !== candidateValidation.relevantObjectCount) {
+        throw new Error(
+          `legacy cache mirror validation mismatch: ${validation.relevantObjectCount} relevant objects ` +
+            `vs ${candidateValidation.relevantObjectCount} expected`,
+        );
+      }
+
+      fs.renameSync(tmpPath, cachePath);
+      this.opts.log.debug(`Legacy /tmp Vantage cache mirror updated at ${cachePath}`);
+    } catch (error) {
+      try {
+        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+      } catch {
+        /* preserve original error */
+      }
+      this.opts.log.warn(`Failed to update legacy /tmp Vantage cache mirror: ${this.errorMessage(error)}`);
     }
   }
 
