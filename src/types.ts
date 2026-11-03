@@ -2,6 +2,7 @@ export type VantageType =
   | 'relay'
   | 'dimmer'
   | 'rgb'
+  | 'fan'
   | 'blind'
   | 'thermostat'
   | 'contact'
@@ -36,6 +37,13 @@ export interface VantageRGB extends VantageDeviceBase {
   power: boolean;
   hue: number;
   sat: number;
+  loadType?: string;
+}
+
+export interface VantageFan extends VantageDeviceBase {
+  type: 'fan';
+  bri: number;
+  power: boolean;
   loadType?: string;
 }
 
@@ -75,6 +83,7 @@ export type VantageDevice =
   | VantageRelay
   | VantageDimmer
   | VantageRGB
+  | VantageFan
   | VantageBlind
   | VantageThermostat
   | VantageContact

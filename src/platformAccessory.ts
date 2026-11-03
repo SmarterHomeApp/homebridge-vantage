@@ -1,6 +1,6 @@
 // src/platformAccessory.ts
 import type { PlatformAccessory, Service, Characteristic } from 'homebridge';
-import type { VantageDevice } from './types';
+import type { VantageDevice, VantageFan } from './types';
 import { VantagePlatform } from './platform';
 import { sanitizeHomeKitName } from './homekitName';
 
@@ -53,6 +53,36 @@ export class VantagePlatformAccessory {
 
       // Category helps iOS
       this.accessory.category = this.platform.api.hap.Categories.SWITCH;
+    }
+
+    if (device.type === 'fan') {
+      const fan = device as VantageFan;
+      primary =
+        this.accessory.getService(this.Service.Fan) ??
+        this.accessory.addService(this.Service.Fan, this.accessory.displayName);
+
+      const on = primary.getCharacteristic(this.Characteristic.On);
+      on.removeAllListeners('set');
+      on.removeAllListeners('get');
+      on.onSet(async (value) => {
+        fan.power = !!value;
+        if (fan.power && fan.bri === 0) fan.bri = 100;
+        this.platform.getInfusion().setBrightness(fan.address, fan.power ? fan.bri : 0);
+      });
+      on.onGet(() => fan.power);
+
+      const speed = primary.getCharacteristic(this.Characteristic.RotationSpeed);
+      speed.setProps({ minValue: 0, maxValue: 100, minStep: 1 });
+      speed.removeAllListeners('set');
+      speed.removeAllListeners('get');
+      speed.onSet(async (value) => {
+        fan.bri = this.clampPercent(value);
+        fan.power = fan.bri > 0;
+        this.platform.getInfusion().setBrightness(fan.address, fan.bri);
+      });
+      speed.onGet(() => this.clampPercent(fan.bri));
+
+      this.accessory.category = this.platform.api.hap.Categories.FAN;
     }
 
     if (device.type === 'dimmer' || device.type === 'rgb') {
@@ -293,6 +323,12 @@ export class VantagePlatformAccessory {
         // ignore if Homebridge version doesn’t support removal
       }
     }
+  }
+
+  private clampPercent(value: unknown): number {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(100, Math.round(n)));
   }
 
   private hapTargetTemperature(value: unknown, fallback = 20): number {

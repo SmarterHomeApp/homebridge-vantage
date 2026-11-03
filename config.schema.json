@@ -48,7 +48,7 @@
         "title": "Include Lights and Loads",
         "type": "boolean",
         "default": true,
-        "description": "Create HomeKit accessories for Vantage loads, dimmers, relays, RGB loads, and similar switch/light devices."
+        "description": "Create HomeKit accessories for Vantage loads, dimmers, relays, RGB loads, fans (loads named fan), and similar switch/light devices."
       },
       "includeBlinds": {
         "title": "Include Blinds and Shades",

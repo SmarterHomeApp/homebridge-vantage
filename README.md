@@ -7,6 +7,7 @@ This plugin replaces the one sold on smarterhome.io allowing anyone to download 
 ## Features
 
 - **Lighting Control**: Supports dimmers, RGB lights, and relays
+- **Fan Control**: Loads whose name contains `fan` appear as HomeKit fans with a speed slider
 - **Thermostat Control**: Full HVAC control with heating/cooling modes
 - **Blind Control**: Window covering automation
 - **Real-time Updates**: Live status updates from your InFusion controller
@@ -121,6 +122,9 @@ Homebridge 1.x still accepts one instance on the main bridge and one child bridg
 - **Dimmers**: Variable brightness control
 - **RGB Lights**: Full color control with HSL values
 - **Relays**: On/off switches for non-dimmable loads
+
+### Fans
+- **Named loads**: If a load name contains `fan` (for example `Master Fan`), HomeKit shows a fan with on/off and a 0–100 speed slider. Speed is the Vantage dim level. HVAC contacts named Fan are still omitted.
 
 ### HVAC
 - **Thermostats**: Temperature control with heating/cooling modes

@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.6] - 2026-11-03
+
+### Added
+- Loads whose name contains `fan` are HomeKit fans with an on/off control and a 0–100 speed slider. Speed uses the same Vantage dim level as a light (`Load.Ramp`). HVAC helper contacts named Fan stay hidden.
+
 ## [1.1.5] - 2026-11-03
 
 ### Fixed

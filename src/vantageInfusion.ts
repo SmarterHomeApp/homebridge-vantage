@@ -695,7 +695,19 @@ export class VantageInfusion extends EventEmitter {
           it.LoadType === 'Motor' ||
           it.LoadType === 'High Voltage Relay';
 
-        if (isRelay) {
+        if (isFanLoadName(name)) {
+          this.opts.log.info(`New fan added (VID=${it.VID}, Name=${name}, FAN)`);
+          pushUnique({
+            name,
+            address: vid,
+            type: 'fan',
+            vid,
+            objectType,
+            loadType: it.LoadType,
+            bri: 100,
+            power: false,
+          });
+        } else if (isRelay) {
           this.opts.log.info(`New relay added (VID=${it.VID}, Name=${name}, RELAY)`);
           pushUnique({
             name,
@@ -1773,4 +1785,9 @@ export class VantageInfusion extends EventEmitter {
 
 export function alternateVantageUsername(username: string): string | undefined {
   return username.trim().toLowerCase() === 'admin' ? 'administrator' : undefined;
+}
+
+/** A load is a fan when its display name contains the word "fan". */
+export function isFanLoadName(name: string): boolean {
+  return /\bfan\b/i.test(String(name ?? ''));
 }

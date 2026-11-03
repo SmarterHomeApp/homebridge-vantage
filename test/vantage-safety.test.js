@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const { VantageInfusion, alternateVantageUsername } = require('../dist/vantageInfusion');
+const { VantageInfusion, alternateVantageUsername, isFanLoadName } = require('../dist/vantageInfusion');
 const { VantagePlatform } = require('../dist/platform');
 const { sanitizeHomeKitName } = require('../dist/homekitName');
 
@@ -356,6 +356,42 @@ test('HomeKit names drop quotes, trailing punctuation, and keep a letter-or-numb
   assert.equal(sanitizeHomeKitName('RECEPTION DESK?'), 'RECEPTION DESK');
   assert.equal(sanitizeHomeKitName('JACK\'S OFFICE LAMP'), 'JACK\'S OFFICE LAMP');
   assert.equal(sanitizeHomeKitName('???'), 'Vantage');
+});
+
+test('loads named fan become HomeKit fans, other loads stay lights', async () => {
+  assert.equal(isFanLoadName('Master Fan'), true);
+  assert.equal(isFanLoadName('FAN'), true);
+  assert.equal(isFanLoadName('Ceiling Fan 1'), true);
+  assert.equal(isFanLoadName('Kitchen Light'), false);
+  assert.equal(isFanLoadName('Fantastic Light'), false);
+
+  const xml = configuration([
+    xmlObject('Load', {
+      VID: 10,
+      ObjectType: 'Load',
+      Name: 'Master Fan',
+      LoadType: 'Incandescent',
+    }),
+    xmlObject('Load', {
+      VID: 11,
+      ObjectType: 'Load',
+      Name: 'Kitchen Light',
+      LoadType: 'Incandescent',
+    }),
+    xmlObject('Load', {
+      VID: 12,
+      ObjectType: 'Load',
+      Name: 'Bath Fan',
+      LoadType: 'High Voltage Relay',
+    }),
+  ]);
+
+  const devices = await makeInfusion().processConfigurationXml(xml, 'fan load classification test');
+  assert.deepEqual(devices.map((device) => [device.vid, device.type]), [
+    ['10', 'fan'],
+    ['11', 'dimmer'],
+    ['12', 'fan'],
+  ]);
 });
 
 test('invalid thermostat sentinel values are not pushed to HomeKit target temperature', () => {

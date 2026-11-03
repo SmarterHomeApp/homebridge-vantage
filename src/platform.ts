@@ -191,7 +191,7 @@ export class VantagePlatform implements DynamicPlatformPlugin {
     const S = this.api.hap.Service;
     const C = this.api.hap.Characteristic;
 
-    // LIGHTS (relay / dimmer / rgb)
+    // LIGHTS (relay / dimmer / rgb) and fans (same load-level feedback)
     this.infusion.on('loadStatusChange', (vid: number, value: number, command?: number) => {
       const acc = this.accessoriesByVid.get(String(vid));
       if (!acc) return;
@@ -200,13 +200,21 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       if (!dev) return;
       this.log.info("loadStatusChange (VID=%s, Name=%s, Bri:%d)", vid, dev.name, value)
 
-      if (dev.type === 'relay' || dev.type === 'dimmer' || dev.type === 'rgb') {
+      if (dev.type === 'relay' || dev.type === 'dimmer' || dev.type === 'rgb' || dev.type === 'fan') {
         (dev as any).bri = Number(value);
         (dev as any).power = (dev as any).bri > 0;
       }
 
       if (dev.type === 'relay') {
         acc.getService(S.Switch)?.updateCharacteristic(C.On, (dev as any).power);
+        return;
+      }
+
+      if (dev.type === 'fan') {
+        const fan = acc.getService(S.Fan);
+        fan?.updateCharacteristic(C.On, (dev as any).power);
+        const speedChar = fan?.getCharacteristic(C.RotationSpeed);
+        if (speedChar) speedChar.value = Math.max(0, Math.min(100, Number((dev as any).bri) || 0));
         return;
       }
 
