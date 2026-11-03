@@ -1243,7 +1243,7 @@ export class VantageInfusion extends EventEmitter {
   }
 
   private static isXmlName(key: string): boolean {
-    return /^[:A-Z_a-z][\w:.\-]*$/.test(key);
+    return /^[:A-Z_a-z][\w:.-]*$/.test(key);
   }
 
   /** Build cache XML from readObjects (same structure + sanitization as original index.js). */
@@ -1726,7 +1726,7 @@ export class VantageInfusion extends EventEmitter {
     this.command.write(`THERMOP ${vid} ${out}\n`);
   }
 
-  async setThermostatTarget(vid: string, value: number, mode?: number, heating?: number, cooling?: number) {
+  async setThermostatTarget(vid: string, value: number, mode?: number, _heating?: number, _cooling?: number) {
     // Match original logic: set temperature based on mode
     const v = Math.round(value);
     if (mode === 1) {

@@ -253,7 +253,7 @@ export class VantagePlatform implements DynamicPlatformPlugin {
     });
 
     // THERMOSTATS — temp (legacy event) - loops through ALL thermostats like original
-    this.infusion.on('thermostatDidChange', (value: number) => {
+    this.infusion.on('thermostatDidChange', (_value: number) => {
       // Loop through all thermostat accessories and refresh their state
       for (const [vid, acc] of this.accessoriesByVid) {
         const dev = acc.context.device as VantageDevice;

@@ -57,6 +57,13 @@ jobs:
       run: npm run build
 
     - name: Publish to npm
-      run: npm publish
+      run: |
+        VERSION=$(node -p "require('./package.json').version")
+        if npm view "@smarterhomeapp/homebridge-vantage@${VERSION}" version >/dev/null 2>&1; then
+          echo "Version ${VERSION} is already published; skipping."
+          exit 0
+        fi
+        npm publish --access public
       env:
-        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }} 
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+ 
