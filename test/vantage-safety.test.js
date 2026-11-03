@@ -610,7 +610,8 @@ test('Organize Home tmp dump copies AreaID onto Area so iOS can map rooms', asyn
   assert.match(dumped, /<LoadType>High Voltage Relay<\/LoadType>/);
   assert.match(dumped, /<AreaID>10<\/AreaID><Area>10<\/Area>/);
   assert.match(dumped, /<AreaID>8<\/AreaID><Area>8<\/Area>/);
+  assert.match(dumped, /<Name>Area 8<\/Name>/);
   assert.match(dumped, /<DryContact>/);
   assert.match(dumped, /<AreaID>0<\/AreaID><Area>0<\/Area>/);
-  assert.doesNotMatch(dumped, /<Name>Unassigned<\/Name>/);
+  assert.match(dumped, /<VID>0<\/VID><Name>Unassigned<\/Name><ObjectType>Area<\/ObjectType>/);
 });

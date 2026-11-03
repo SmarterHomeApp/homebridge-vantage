@@ -1256,7 +1256,7 @@ export class VantageInfusion extends EventEmitter {
   }
 
   private objectsForLegacyTmpDump(objects: any[]): any[] {
-    return objects.map((raw) => {
+    const dumped = objects.map((raw) => {
       const key = Object.keys(raw)[0];
       if (!key || !raw[key] || typeof raw[key] !== 'object' || Array.isArray(raw[key])) return raw;
       const body = raw[key] as Record<string, unknown>;
@@ -1264,6 +1264,35 @@ export class VantageInfusion extends EventEmitter {
       if (!areaVid) return raw;
       return { [key]: { ...body, Area: areaVid } };
     });
+
+    // Organize Home aborts if a HomeKit accessory's Area VID is not in the Area list.
+    const areaVids = new Set(
+      dumped
+        .filter((raw) => {
+          const key = Object.keys(raw)[0];
+          const body = raw[key] as Record<string, unknown> | undefined;
+          return key === 'Area' || String(body?.ObjectType ?? '') === 'Area';
+        })
+        .map((raw) => String((raw[Object.keys(raw)[0]] as Record<string, unknown>)?.VID ?? '')),
+    );
+    const missingAreaVids = new Set<string>();
+    for (const raw of dumped) {
+      const key = Object.keys(raw)[0];
+      const body = raw[key] as Record<string, unknown> | undefined;
+      if (key === 'Area' || String(body?.ObjectType ?? '') === 'Area') continue;
+      const areaVid = VantageInfusion.organizeHomeAreaVid(body);
+      if (areaVid && !areaVids.has(areaVid)) missingAreaVids.add(areaVid);
+    }
+    for (const vid of missingAreaVids) {
+      dumped.unshift({
+        Area: {
+          VID: vid,
+          Name: vid === '0' ? 'Unassigned' : `Area ${vid}`,
+          ObjectType: 'Area',
+        },
+      });
+    }
+    return dumped;
   }
 
   /** 1.0.8 xml2json wrote this as `Area`; xml2js keeps Infusion's `AreaID`. */
