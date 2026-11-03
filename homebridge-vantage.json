@@ -38,6 +38,34 @@
         "default": true,
         "description": "Use cached configuration to speed up discovery"
       },
+      "includeLights": {
+        "title": "Include Lights and Loads",
+        "type": "boolean",
+        "required": false,
+        "default": true,
+        "description": "Create HomeKit accessories for Vantage loads, dimmers, relays, RGB loads, and similar switch/light devices."
+      },
+      "includeBlinds": {
+        "title": "Include Blinds and Shades",
+        "type": "boolean",
+        "required": false,
+        "default": true,
+        "description": "Create HomeKit accessories for Vantage blinds, shades, and window coverings."
+      },
+      "includeThermostats": {
+        "title": "Include Thermostats",
+        "type": "boolean",
+        "required": false,
+        "default": true,
+        "description": "Create HomeKit accessories for Vantage thermostats and HVAC zones."
+      },
+      "includeSensors": {
+        "title": "Include Sensors and Contacts",
+        "type": "boolean",
+        "required": false,
+        "default": true,
+        "description": "Create HomeKit accessories for dry contacts, temperature sensors, light sensors, and Omni sensors."
+      },
       "omit": {
         "title": "Omit Devices",
         "type": "string",
@@ -48,7 +76,7 @@
         "title": "Device Range",
         "type": "string",
         "required": false,
-        "description": "Comma-separated VID range (min,max) to limit discovery"
+        "description": "VID range using min-max, e.g. 0-5000. Legacy comma format such as 0,5000 is still supported."
       },
       "isInsecure": {
         "title": "Use Non-SSL Connections",
@@ -76,6 +104,10 @@
       "title": "Discovery Options",
       "items": [
         "usecache",
+        "includeLights",
+        "includeBlinds",
+        "includeThermostats",
+        "includeSensors",
         "omit",
         "range"
       ]

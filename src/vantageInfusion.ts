@@ -1,46 +1,69 @@
 import { EventEmitter } from 'events';
 import * as net from 'net';
 import * as tls from 'tls';
+import * as dgram from 'dgram';
 import { Parser } from 'xml2js';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Logger } from 'homebridge';
 import type { VantageDevice } from './types';
 
-const TYPE_THERMO = [
-  'Thermostat',
-  'Vantage.HVAC-Interface_Point_Zone_CHILD',
-  'Vantage.VirtualThermostat_PORT',
-  'Tekmar.tN4_Gateway_482_Zone_-_Slab_Only_CHILD',
-  'Tekmar.tN4_Gateway_482_Zone_CHILD',
-  'Legrand.MH_HVAC_Control_CHILD',
-  'Vantage.HVAC-IU-Zone_CHILD'
+const CONFIGURATION_CONTROLLERS = [
+  { name: 'areas', vantageTypes: ['Area'] },
+  {
+    name: 'loads',
+    vantageTypes: [
+      'Load',
+      'Legrand.MH_Relay_CHILD',
+      'Legrand.MH_Dimmer_CHILD',
+      'Jandy.Aqualink_RS_Pump_CHILD',
+      'Jandy.Aqualink_RS_Auxiliary_CHILD',
+    ],
+  },
+  {
+    name: 'rgbLoads',
+    vantageTypes: ['Vantage.DGColorLoad', 'Vantage.DDGColorLoad'],
+  },
+  {
+    name: 'blinds',
+    vantageTypes: [
+      'Blind',
+      'RelayBlind',
+      'QISBlind',
+      'QubeBlind',
+      'Lutron.Shade_x2F_Blind_Child_CHILD',
+      'ESI.RQShadeChannel_CHILD',
+      'QMotion.QIS_Channel_CHILD',
+      'Somfy.UAI-RS485-Motor_CHILD',
+      'Somfy.RS-485_Shade_CHILD',
+      'Somfy.URTSI_2_Shade_CHILD',
+    ],
+  },
+  {
+    name: 'thermostats',
+    vantageTypes: [
+      'Thermostat',
+      'Vantage.HVAC-Interface_Point_Zone_CHILD',
+      'Vantage.Generic_HVAC_RS485_Zone_CHILD',
+      'Vantage.Generic_HVAC_RS485_Zone_without_FanSpeed_CHILD',
+      'Tekmar.tN4_Gateway_482_Zone_-_Slab_Only_CHILD',
+      'Tekmar.tN4_Gateway_482_Zone_CHILD',
+      'Legrand.MH_HVAC_Control_CHILD',
+      'Vantage.HVAC-IU-Zone_CHILD',
+      'Vantage.VirtualThermostat_PORT',
+    ],
+  },
+  {
+    name: 'sensors',
+    vantageTypes: ['DryContact', 'Temperature', 'LightSensor', 'OmniSensor'],
+  },
 ];
 
-const TYPE_BLIND = [
-  'Blind',
-  'RelayBlind',
-  'QISBlind',
-  'Lutron.Shade_x2F_Blind_Child_CHILD',
-  'QubeBlind',
-  'ESI.RQShadeChannel_CHILD',
-  'QMotion.QIS_Channel_CHILD',
-  'Somfy.UAI-RS485-Motor_CHILD',
-];
+// These are controller configuration query roots, not HomeKit classification rules.
+// HomeKit classification happens later from object fields/capabilities.
+const CONFIG_OBJECT_TYPES = CONFIGURATION_CONTROLLERS.flatMap((controller) => controller.vantageTypes);
 
-const OBJECT_TYPES = [
-  'Area',
-  'Load',
-  'Vantage.DDGColorLoad',
-  'Legrand.MH_Relay_CHILD',
-  'Legrand.MH_Dimmer_CHILD',
-  'Jandy.Aqualink_RS_Pump_CHILD',
-  'Jandy.Aqualink_RS_Auxiliary_CHILD',
-  ...TYPE_THERMO,
-  ...TYPE_BLIND,
-];
-
-const DISCOVERABLE_OBJECT_TYPES = OBJECT_TYPES.filter((type) => type !== 'Area');
+const DISCOVERABLE_OBJECT_TYPES = CONFIG_OBJECT_TYPES.filter((type) => type !== 'Area');
 
 interface Options {
   ipaddress: string;
@@ -52,12 +75,18 @@ interface Options {
   log: Logger;
   storagePath: string;
   forceSSL?: boolean;
+  includeLights?: boolean;
+  includeBlinds?: boolean;
+  includeThermostats?: boolean;
+  includeSensors?: boolean;
 }
 
 interface ValidatedConfiguration {
   objects: any[];
   relevantObjectCount: number;
 }
+
+type ThermostatTemperatureRole = 'indoor' | 'cool' | 'heat';
 
 class CandidateConfigurationError extends Error {
   constructor(message: string) {
@@ -71,6 +100,10 @@ export class VantageInfusion extends EventEmitter {
   private command!: net.Socket | tls.TLSSocket;
   private isInsecureCmd = true; // 3001 vs 3010
   private isInsecureCfg = true; // 2001 vs 2010
+  private readonly thermostatTemperatureChildren = new Map<string, {
+    parentVid: string;
+    role: ThermostatTemperatureRole;
+  }>();
   
   private getPersistentCachePath(): string {
     const fileName = `vantage-${this.cacheKeyForIp(this.opts.ipaddress)}.dc`;
@@ -92,23 +125,34 @@ export class VantageInfusion extends EventEmitter {
 
   constructor(private readonly opts: Options) {
     super();
-    this.opts.log.debug(`Persistent Vantage cache path: ${this.getPersistentCachePath()}`);
   }
 
   /** Probe ports and open command session */
   async start() {
+    await this.ensureControllerAddress();
+
     if (this.opts.forceSSL) {
       this.isInsecureCmd = false;
       this.isInsecureCfg = false;
     } else {
       // Probe sequentially to avoid controller session limits
-      const cmdResult = await this.portUsable(3001, 'STATUS ALL\n');
+      let cmdResult = await this.portUsable(3001, 'STATUS ALL\n');
       // brief backoff before probing config port
       await new Promise((r) => setTimeout(r, 150));
-      const cfgResult = await this.portUsable(
+      let cfgResult = await this.portUsable(
         2001,
         '<IIntrospection><GetInterfaces><call></call></GetInterfaces></IIntrospection>\n',
       );
+
+      if (!cmdResult && !cfgResult && await this.discoverAndApplyController('configured controller did not respond')) {
+        cmdResult = await this.portUsable(3001, 'STATUS ALL\n');
+        await new Promise((r) => setTimeout(r, 150));
+        cfgResult = await this.portUsable(
+          2001,
+          '<IIntrospection><GetInterfaces><call></call></GetInterfaces></IIntrospection>\n',
+        );
+      }
+
       this.isInsecureCmd = !!cmdResult;
       this.isInsecureCfg = !!cfgResult;
     }
@@ -117,11 +161,110 @@ export class VantageInfusion extends EventEmitter {
     this.opts.log.info(this.isInsecureCmd ? 'Using insecure port: 3001' : 'Using SSL port: 3010');
     this.opts.log.info(this.isInsecureCfg ? 'Using insecure port: 2001' : 'Using SSL port: 2010');
 
-    await this.startCommand();
+    try {
+      await this.startCommand();
+    } catch (error) {
+      if (await this.discoverAndApplyController('command socket failed to open')) {
+        await this.startCommand();
+        return;
+      }
+
+      throw error;
+    }
+  }
+
+  private async ensureControllerAddress() {
+    if (this.opts.ipaddress) return;
+
+    const discovered = await this.discoverAndApplyController('no controller IP configured');
+    if (!discovered) {
+      throw new Error('No Vantage controller IP configured and mDNS discovery did not find an InFusion controller');
+    }
+  }
+
+  private async discoverAndApplyController(reason: string): Promise<boolean> {
+    this.opts.log.warn(`Attempting Vantage controller mDNS discovery: ${reason}`);
+    const discovered = await this.discoverControllerMdns();
+    if (!discovered) return false;
+
+    this.opts.ipaddress = discovered.host;
+    if (!this.opts.forceSSL) {
+      this.isInsecureCmd = !discovered.secure;
+      this.isInsecureCfg = !discovered.secure;
+    }
+
+    this.opts.log.warn(
+      `Discovered Vantage InFusion controller at ${discovered.host} using ${discovered.secure ? 'secure' : 'insecure'} ACI service`,
+    );
+    return true;
+  }
+
+  private discoverControllerMdns(timeoutMs = 3000): Promise<{ host: string; secure: boolean } | undefined> {
+    const services = [
+      { name: '_secure_aci._tcp.local', secure: true },
+      { name: '_aci._tcp.local', secure: false },
+    ];
+
+    return new Promise((resolve) => {
+      const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+      let resolved = false;
+
+      const finish = (result?: { host: string; secure: boolean }) => {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timer);
+        try { socket.close(); } catch { /* noop */ }
+        resolve(result);
+      };
+
+      const timer = setTimeout(() => finish(), timeoutMs);
+
+      socket.on('message', (message, rinfo) => {
+        const response = message.toString('latin1').toLowerCase();
+        if (!response.includes('aci') || !response.includes('infusion')) return;
+
+        const secure = response.includes('_secure_aci');
+        finish({ host: rinfo.address, secure });
+      });
+
+      socket.on('error', () => finish());
+      socket.bind(0, () => {
+        try {
+          socket.setMulticastTTL(255);
+          for (const service of services) {
+            const query = this.buildMdnsPtrQuery(service.name);
+            socket.send(query, 0, query.length, 5353, '224.0.0.251');
+          }
+        } catch {
+          finish();
+        }
+      });
+    });
+  }
+
+  private buildMdnsPtrQuery(name: string): Buffer {
+    const labels = name.split('.');
+    const parts: Buffer[] = [
+      Buffer.from([0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+    ];
+
+    for (const label of labels) {
+      if (!label) continue;
+      const labelBytes = Buffer.from(label);
+      parts.push(Buffer.from([labelBytes.length]), labelBytes);
+    }
+
+    parts.push(Buffer.from([0x00, 0x00, 0x0c, 0x00, 0x01]));
+    return Buffer.concat(parts);
   }
 
   private portUsable(port: number, probe: string): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
+      if (!this.opts.ipaddress) {
+        resolve(false);
+        return;
+      }
+
       let sawData = false;
       this.opts.log.debug(`Testing ${this.opts.ipaddress}:${port} with probe: "${probe.trim()}"`);
 
@@ -174,8 +317,10 @@ export class VantageInfusion extends EventEmitter {
   }
 
   private async startCommand() {
-    return new Promise<void>((resolve) => {
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
       const onConnect = (socket: net.Socket | tls.TLSSocket) => {
+        settled = true;
         this.command = socket;
 
         // Legacy “connected” log
@@ -183,6 +328,10 @@ export class VantageInfusion extends EventEmitter {
 
         if (this.opts.username && this.opts.password) {
           this.command.write(`Login ${this.opts.username} ${this.opts.password}\n`);
+          const alternateUsername = alternateVantageUsername(this.opts.username);
+          if (alternateUsername) {
+            this.command.write(`Login ${alternateUsername} ${this.opts.password}\n`);
+          }
         }
         this.command.write('STATUS ALL\n');
         this.command.write(
@@ -200,8 +349,15 @@ export class VantageInfusion extends EventEmitter {
         resolve();
       };
 
+      const rejectOnInitialError = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+
       if (this.isInsecureCmd) {
         const sock = net.connect({ host: this.opts.ipaddress, port: 3001 }, () => onConnect(sock));
+        sock.once('error', rejectOnInitialError);
         this.wireCommandSocket(sock);
       } else {
         const sock = tls.connect(
@@ -210,6 +366,7 @@ export class VantageInfusion extends EventEmitter {
           { rejectUnauthorized: false, requestCert: true },
           () => onConnect(sock),
         );
+        sock.once('error', rejectOnInitialError);
         this.wireCommandSocket(sock);
       }
     });
@@ -221,13 +378,35 @@ export class VantageInfusion extends EventEmitter {
       // Legacy “Port … has closed!!” lines
       this.opts.log.warn(this.isInsecureCmd ? '\n\nPort 3001 has closed!!\n\n' : '\n\nPort 3010 has closed!!\n\n');
       this.opts.log.warn('Command port closed – reconnecting in 5s');
-      setTimeout(() => this.startCommand(), 5000);
+      setTimeout(() => this.reconnectCommandSocket(), 5000);
     });
     sock.on('end', () => {
       // Legacy “Port … has ended!!”
       this.opts.log.warn(this.isInsecureCmd ? 'Port 3001 has ended!!' : 'Port 3010 has ended!!');
     });
-    sock.on('error', (e) => this.opts.log.debug(`Command socket error: ${String(e)}`));
+    sock.on('error', (e) => {
+      this.opts.log.debug(`Command socket error: ${String(e)}`);
+      try { sock.destroy(); } catch { /* noop */ }
+    });
+  }
+
+  private async reconnectCommandSocket() {
+    try {
+      if (!this.opts.forceSSL) {
+        const port = this.isInsecureCmd ? 3001 : 3010;
+        const reachable = await this.portUsable(port, 'STATUS ALL\n');
+        if (!reachable) {
+          await this.discoverAndApplyController('command reconnect failed');
+        }
+      }
+
+      await this.startCommand();
+      this.opts.log.info('Command socket reconnected and event subscriptions were re-sent');
+    } catch (error) {
+      await this.discoverAndApplyController('command reconnect failed');
+      this.opts.log.warn(`Command reconnect failed; retrying in 5s: ${this.errorMessage(error)}`);
+      setTimeout(() => this.reconnectCommandSocket(), 5000);
+    }
   }
 
   private parseRealtime(buffer: string) {
@@ -251,7 +430,10 @@ export class VantageInfusion extends EventEmitter {
           this.emit('loadStatusChange', Number.parseInt(dataItem[1]), Number.parseInt(dataItem[2]), Number.parseInt(dataItem[4]));
           }
           if (dataItem[0] === 'S:TEMP') {
-          this.emit('thermostatDidChange', Number.parseInt(dataItem[2]));
+          if (this.emitThermostatChildTemperatureIfMapped(dataItem[1], dataItem[2])) {
+            continue;
+          }
+          this.emit('thermostatDidChange', Number.parseInt(dataItem[2] ?? dataItem[1]));
         } else if (dataItem[0] === 'R:INVOKE' && (dataItem[3] || '').includes('Thermostat.GetIndoorTemperature')) {
           this.emit('thermostatIndoorTemperatureChange', Number.parseInt(dataItem[1]), Number.parseFloat(dataItem[2]));
           } else if (dataItem[0] === 'S:THERMOP' || dataItem[0] === 'R:GETTHERMOP' || dataItem[0] === 'R:THERMTEMP') {
@@ -278,6 +460,18 @@ export class VantageInfusion extends EventEmitter {
             `isInterfaceSupportedAnswer-${Number.parseInt(dataItem[1])}-${Number.parseInt(dataItem[4])}`,
             Number.parseInt(dataItem[2]),
           );
+        }
+        if (line.startsWith('S:DRYCONTACT') || line.startsWith('R:GETDRYCONTACT')) {
+          this.emit('contactStatusChange', Number.parseInt(dataItem[1]), this.truthyStatus(dataItem[2]));
+        }
+        if (line.startsWith('S:LIGHTSENSOR') || line.startsWith('R:GETLIGHTSENSOR')) {
+          this.emit('lightSensorChange', Number.parseInt(dataItem[1]), Number.parseFloat(dataItem[2]));
+        }
+        if (line.startsWith('S:TEMPERATURE') || line.startsWith('R:GETTEMPERATURE')) {
+          if (this.emitThermostatChildTemperatureIfMapped(dataItem[1], dataItem[2])) {
+            continue;
+          }
+          this.emit('temperatureSensorChange', Number.parseInt(dataItem[1]), Number.parseFloat(dataItem[2]));
         }
       } catch {
         this.opts.log.debug('Realtime parse error for line: ' + line);
@@ -330,6 +524,11 @@ export class VantageInfusion extends EventEmitter {
       return devices;
     } catch (error) {
       this.opts.log.warn(`Fresh controller discovery failed; attempting persistent fallback cache: ${this.errorMessage(error)}`);
+      if (!this.hasCredentials()) {
+        this.opts.log.warn(
+          'No Vantage username/password configured. If this controller requires authentication, add credentials in the Homebridge plugin config.',
+        );
+      }
 
       if (this.opts.usecache) {
         try {
@@ -346,16 +545,26 @@ export class VantageInfusion extends EventEmitter {
   private async processConfigurationXml(xml: string, source = 'configuration'): Promise<VantageDevice[]> {
     const { objects } = await this.parseAndValidateConfigurationXml(xml, source);
     const devices: VantageDevice[] = [];
+    this.thermostatTemperatureChildren.clear();
 
     const Areas = objects.filter((el: any) => Object.keys(el)[0] === 'Area');
     const Area: Record<string, any> = {};
     for (const a of Areas) Area[a.Area.VID] = a.Area;
+    const thermostatVids = new Set<string>();
+
+    for (const raw of objects) {
+      const key = Object.keys(raw)[0];
+      const it = raw[key];
+      if (!it) continue;
+      if (this.isThermostatConfigObject(key, it)) {
+        thermostatVids.add(String(it.VID));
+      }
+    }
 
     const omit = (this.opts.omit || '').replace(/\s+/g, '');
     const omitSet = new Set<string>(omit ? omit.split(',') : []);
 
-    const rangeStr = (this.opts.range || '0,999999999').replace(/\s+/g, '');
-    const [minVID, maxVID] = rangeStr.split(',').map((x) => Number.parseInt(x, 10));
+    const [minVID, maxVID] = this.parseVidRange(this.opts.range);
 
     const blindOpenClose: Record<string, string> = {};
     const seenNames = new Set<string>();
@@ -363,40 +572,55 @@ export class VantageInfusion extends EventEmitter {
     for (const raw of objects) {
       const key = Object.keys(raw)[0];
       const it = raw[key];
+      const objectType = String(it.ObjectType || key);
       const vid = String(it.VID);
 
       if (omitSet.has(vid)) continue;
       const vidNum = Number.parseInt(vid, 10);
       if (!(vidNum >= minVID && vidNum <= maxVID)) continue;
-      if (!OBJECT_TYPES.includes(it.ObjectType)) continue;
+      if (!this.isDiscoverableConfigObject(key, it)) continue;
 
-      // Normalized name (Area + Name, dedup with VID suffix)
-      let name: string = String(it.DName || it.Name || '');
-      if (it.Area && Area[it.Area]?.Name) name = `${Area[it.Area].Name} ${name}`;
-      name = name.replace(/-/g, '') || `VID${vid}`;
+      if (key === 'Temperature' || objectType === 'Temperature') {
+        const thermostatChild = this.getThermostatTemperatureChild(it, thermostatVids);
+        if (thermostatChild) {
+          this.thermostatTemperatureChildren.set(vid, thermostatChild);
+          this.opts.log.debug(
+            `Mapped thermostat child temperature VID ${vid} to thermostat VID ${thermostatChild.parentVid} (${thermostatChild.role})`,
+          );
+          continue;
+        }
+      }
+
+      // Area prefix keeps two "LAMP" loads unique in the Home app.
+      // sanitizeXml renames a load's <Area>vid</Area> to <AreaID>.
+      const areaId = String(it.AreaID || it.Area || '');
+      const areaName = String(Area[areaId]?.Name || Area[areaId]?.DName || '').trim();
+      let name = String(it.DName || it.Name || '').trim() || `VID${vid}`;
+      if (areaName) name = `${areaName} ${name}`;
       const nameKey = name.toLowerCase();
       if (seenNames.has(nameKey)) {
         name = `${name} VID${vid}`;
       }
-      seenNames.add(name.toLowerCase());
+      seenNames.add(nameKey);
 
       const pushUnique = (dev: VantageDevice) => {
         if (devices.find((d) => d.vid === vid)) return;
         devices.push(dev);
       };
 
-      if (it.DeviceCategory === 'HVAC' || TYPE_THERMO.includes(it.ObjectType)) {
+      if (this.isThermostatConfigObject(key, it)) {
+        if (this.opts.includeThermostats === false) continue;
         this.opts.log.info(`New HVAC added (VID=${it.VID}, Name=${name})`);
         pushUnique({
           name,
           address: vid,
           type: 'thermostat',
           vid,
-          objectType: it.ObjectType,
-          temperature: 0,
-          targetTemp: 0,
-          heating: 0,
-          cooling: 0,
+          objectType,
+          temperature: 20,
+          targetTemp: 20,
+          heating: 20,
+          cooling: 25,
           mode: 0,
           current: 0,
           units: 1,
@@ -405,18 +629,14 @@ export class VantageInfusion extends EventEmitter {
       }
 
       if (
-        key === 'Load' ||
-        it.ObjectType === 'Load' ||
-        it.ObjectType === 'Legrand.MH_Dimmer_CHILD' ||
-        it.ObjectType === 'Legrand.MH_Relay_CHILD' ||
-        it.ObjectType === 'Vantage.DDGColorLoad' ||
-        it.ObjectType === 'Jandy.Aqualink_RS_Auxiliary_CHILD' ||
-        it.ObjectType === 'Jandy.Aqualink_RS_Pump_CHILD'
+        this.isLoadConfigObject(key, it)
       ) {
+        if (this.opts.includeLights === false) continue;
+        const isColorLoad = this.isColorLoadConfigObject(key, it);
         const isRelay =
-          it.ObjectType === 'Jandy.Aqualink_RS_Pump_CHILD' ||
-          it.ObjectType === 'Jandy.Aqualink_RS_Auxiliary_CHILD' ||
-          it.ObjectType === 'Legrand.MH_Relay_CHILD' ||
+          objectType.includes('Relay') ||
+          objectType.includes('Pump') ||
+          objectType.includes('Auxiliary') ||
           it.LoadType === 'Fluor. Mag non-Dim' ||
           it.LoadType === 'LED non-Dim' ||
           it.LoadType === 'Fluor. Electronic non-Dim' ||
@@ -431,19 +651,19 @@ export class VantageInfusion extends EventEmitter {
             address: vid,
             type: 'relay',
             vid,
-            objectType: it.ObjectType,
+            objectType,
             loadType: it.LoadType,
             bri: 100,
             power: false,
           });
-        } else if (it.ObjectType === 'Vantage.DDGColorLoad') {
+        } else if (isColorLoad) {
           this.opts.log.info(`New load added (VID=${it.VID}, Name=${name}, RGB)`);
           pushUnique({
             name,
             address: vid,
             type: 'rgb',
             vid,
-            objectType: it.ObjectType,
+            objectType,
             loadType: it.LoadType,
             bri: 100,
             power: false,
@@ -457,7 +677,7 @@ export class VantageInfusion extends EventEmitter {
             address: vid,
             type: 'dimmer',
             vid,
-            objectType: it.ObjectType,
+            objectType,
             loadType: it.LoadType,
             bri: 100,
             power: false,
@@ -466,13 +686,80 @@ export class VantageInfusion extends EventEmitter {
         continue;
       }
 
-      if (TYPE_BLIND.includes(it.ObjectType)) {
-        if (it.ObjectType === 'RelayBlind') {
+      if (this.isBlindConfigObject(key, it)) {
+        if (this.opts.includeBlinds === false) continue;
+        if (objectType === 'RelayBlind') {
           blindOpenClose[it.OpenLoad] = it.OpenLoad;
           blindOpenClose[it.CloseLoad] = it.CloseLoad;
         }
         this.opts.log.info(`New Blind added (VID=${it.VID}, Name=${name}, BLIND)`);
-        pushUnique({ name, address: vid, type: 'blind', vid, objectType: it.ObjectType, pos: 100, posState: 2 });
+        pushUnique({ name, address: vid, type: 'blind', vid, objectType, pos: 100, posState: 2 });
+        continue;
+      }
+
+      if (key === 'DryContact' || objectType === 'DryContact') {
+        if (this.isThermostatHelperDryContact(it, thermostatVids)) {
+          this.opts.log.debug(`Skipping thermostat helper dry contact VID ${vid} (${name})`);
+          continue;
+        }
+        if (this.opts.includeSensors === false) continue;
+        this.opts.log.info(`New dry contact added (VID=${it.VID}, Name=${name})`);
+        pushUnique({ name, address: vid, type: 'contact', vid, objectType, contact: false });
+        continue;
+      }
+
+      if (key === 'Temperature' || objectType === 'Temperature') {
+        if (this.opts.includeSensors === false) continue;
+        this.opts.log.info(`New temperature sensor added (VID=${it.VID}, Name=${name})`);
+        pushUnique({
+          name,
+          address: vid,
+          type: 'temperatureSensor',
+          vid,
+          objectType,
+          temperature: this.toNumber(it.Value ?? it.SensorValue ?? it.Temperature, 0),
+        });
+        continue;
+      }
+
+      if (key === 'LightSensor' || objectType === 'LightSensor') {
+        if (this.opts.includeSensors === false) continue;
+        this.opts.log.info(`New light sensor added (VID=${it.VID}, Name=${name})`);
+        pushUnique({
+          name,
+          address: vid,
+          type: 'lightSensor',
+          vid,
+          objectType,
+          lightLevel: this.toNumber(it.Value ?? it.SensorValue ?? it.LightLevel, 0.0001),
+        });
+        continue;
+      }
+
+      if (key === 'OmniSensor' || objectType === 'OmniSensor') {
+        if (this.opts.includeSensors === false) continue;
+        const sensorValue = this.toNumber(it.Value ?? it.SensorValue ?? it.LightLevel ?? it.Temperature, 0);
+        if (String(it.Units ?? it.SensorType ?? '').toLowerCase().includes('lux')) {
+          this.opts.log.info(`New Omni light sensor added (VID=${it.VID}, Name=${name})`);
+          pushUnique({
+            name,
+            address: vid,
+            type: 'lightSensor',
+            vid,
+            objectType,
+            lightLevel: Math.max(0.0001, sensorValue),
+          });
+        } else {
+          this.opts.log.info(`New Omni temperature sensor added (VID=${it.VID}, Name=${name})`);
+          pushUnique({
+            name,
+            address: vid,
+            type: 'temperatureSensor',
+            vid,
+            objectType,
+            temperature: sensorValue,
+          });
+        }
         continue;
       }
     }
@@ -484,14 +771,44 @@ export class VantageInfusion extends EventEmitter {
     this.opts.log.info(`Found ${filtered.length} devices`);
 
     if (filtered.length >= 150) {
-      // Legacy Apple limit line
       this.opts.log.warn(
-        'Number of devices exceeds Apples limit of 149. Only loading first 149 devices. Please omit some loads',
+        `Found ${filtered.length} devices, which exceeds the HomeKit bridge limit of 149 accessories.`,
+      );
+      this.opts.log.warn(
+        'Only the first 149 devices will be loaded on this bridge. Split this controller across multiple ' +
+          'VantageControls platform instances using VID ranges, and configure additional instances as child bridges.',
+      );
+      this.opts.log.warn(
+        `Suggested VID ranges for this controller: ${this.suggestVidRanges(filtered).join(', ')}`,
       );
       filtered.splice(149);
     }
 
     return filtered;
+  }
+
+  private suggestVidRanges(devices: VantageDevice[]): string[] {
+    const vids = devices
+      .map((device) => Number.parseInt(String(device.vid), 10))
+      .filter((vid) => Number.isFinite(vid))
+      .sort((a, b) => a - b);
+
+    if (vids.length <= 149) return ['0-999999999'];
+
+    const targetPerBridge = 125;
+    const bridgeCount = Math.max(2, Math.ceil(vids.length / targetPerBridge));
+    const chunkSize = Math.ceil(vids.length / bridgeCount);
+    const ranges: string[] = [];
+    let start = 0;
+
+    for (let index = chunkSize - 1; index < vids.length - 1; index += chunkSize) {
+      const end = vids[index];
+      ranges.push(`${start}-${end}`);
+      start = end + 1;
+    }
+
+    ranges.push(`${start}-999999999`);
+    return ranges;
   }
 
   private async parseAndValidateConfigurationXml(xml: string, source: string): Promise<ValidatedConfiguration> {
@@ -538,13 +855,231 @@ export class VantageInfusion extends EventEmitter {
     const value = raw[key];
     if (!value || typeof value !== 'object') return false;
 
-    const objectType = value?.ObjectType ?? key;
+    return this.isDiscoverableConfigObject(key, value);
+  }
 
-    return DISCOVERABLE_OBJECT_TYPES.includes(key) || DISCOVERABLE_OBJECT_TYPES.includes(objectType);
+  private isDiscoverableConfigObject(key: string, it: any): boolean {
+    const objectType = this.configObjectType(key, it);
+    return (
+      DISCOVERABLE_OBJECT_TYPES.includes(key) ||
+      DISCOVERABLE_OBJECT_TYPES.includes(objectType) ||
+      this.isLoadConfigObject(key, it) ||
+      this.isBlindConfigObject(key, it) ||
+      this.isThermostatConfigObject(key, it)
+    );
+  }
+
+  private configObjectType(key: string, it: any): string {
+    return String(it?.ObjectType || key);
+  }
+
+  private isGroupConfigObject(key: string, it: any): boolean {
+    const objectType = this.configObjectType(key, it).toLowerCase();
+    return objectType.includes('group') || key.toLowerCase().includes('group') || it.LoadTable || it.BlindTable;
+  }
+
+  private hasAnyField(it: any, fields: string[]): boolean {
+    return fields.some((field) => it[field] !== undefined && it[field] !== null && it[field] !== '');
+  }
+
+  private controllerHasType(controllerName: string, key: string, it: any): boolean {
+    const objectType = this.configObjectType(key, it);
+    const controller = CONFIGURATION_CONTROLLERS.find((entry) => entry.name === controllerName);
+    return Boolean(controller?.vantageTypes.includes(key) || controller?.vantageTypes.includes(objectType));
+  }
+
+  private isLoadConfigObject(key: string, it: any): boolean {
+    if (this.isGroupConfigObject(key, it)) return false;
+    if (this.controllerHasType('loads', key, it) || this.controllerHasType('rgbLoads', key, it)) return true;
+
+    return this.hasAnyField(it, [
+      'LoadType',
+      'PowerProfile',
+      'FixturePower',
+      'FixtureDefinition',
+      'OverrideLevel',
+      'DimmingConfig',
+    ]);
+  }
+
+  private isColorLoadConfigObject(key: string, it: any): boolean {
+    const objectType = this.configObjectType(key, it);
+    return key.includes('ColorLoad') || objectType.includes('ColorLoad');
+  }
+
+  private isBlindConfigObject(key: string, it: any): boolean {
+    if (this.isGroupConfigObject(key, it)) return false;
+    if (this.controllerHasType('blinds', key, it)) return true;
+
+    return this.hasAnyField(it, [
+      'ShadeType',
+      'ShadeOrientation',
+      'Movement',
+      'OpenLoad',
+      'CloseLoad',
+      'PowerLoad',
+    ]);
+  }
+
+  private isThermostatConfigObject(key: string, it: any): boolean {
+    if (this.isGroupConfigObject(key, it)) return false;
+    if (it.DeviceCategory === 'HVAC' || this.controllerHasType('thermostats', key, it)) return true;
+
+    const objectType = this.configObjectType(key, it);
+    const normalized = `${key} ${objectType}`.toLowerCase();
+    if (normalized.includes('thermostat') || normalized.includes('hvac')) return true;
+
+    return this.hasAnyField(it, [
+      'OperationMode',
+      'FanMode',
+      'DayMode',
+      'ExternalTemperature',
+      'Humidistat',
+    ]);
   }
 
   private errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  private hasCredentials(): boolean {
+    return Boolean(this.opts.username && this.opts.password);
+  }
+
+  private rememberSuccessfulUsername(username: string) {
+    if (username && username !== this.opts.username) {
+      this.opts.username = username;
+    }
+  }
+
+  private toNumber(value: unknown, fallback: number): number {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  private truthyStatus(value: unknown): boolean {
+    const normalized = String(value ?? '').trim().toUpperCase();
+    return normalized === '1' || normalized === 'ON' || normalized === 'TRUE' || normalized === 'CLOSED';
+  }
+
+  private parseVidRange(range: string | undefined): [number, number] {
+    const raw = String(range || '0-999999999').trim();
+    const match = raw.match(/^(\d+)\s*[-,]\s*(\d+)$/);
+
+    if (!match) {
+      this.opts.log.warn(`Invalid Vantage VID range "${raw}"; using default range 0-999999999.`);
+      return [0, 999999999];
+    }
+
+    const minVID = Number.parseInt(match[1], 10);
+    const maxVID = Number.parseInt(match[2], 10);
+    if (!Number.isFinite(minVID) || !Number.isFinite(maxVID) || minVID > maxVID) {
+      this.opts.log.warn(`Invalid Vantage VID range "${raw}"; using default range 0-999999999.`);
+      return [0, 999999999];
+    }
+
+    return [minVID, maxVID];
+  }
+
+  private getConfigurationObjectTypes(): string[] {
+    return [...CONFIG_OBJECT_TYPES];
+  }
+
+  private getConfigurationControllers() {
+    return CONFIGURATION_CONTROLLERS.map((controller) => ({
+      name: controller.name,
+      vantageTypes: [...controller.vantageTypes],
+    }));
+  }
+
+  private emitThermostatChildTemperatureIfMapped(vid: unknown, value: unknown): boolean {
+    const childVid = String(vid ?? '').trim();
+    const mapping = this.thermostatTemperatureChildren.get(childVid);
+    if (!mapping) return false;
+
+    const temperature = Number.parseFloat(String(value));
+    if (!Number.isFinite(temperature)) return false;
+
+    this.emit('thermostatChildTemperatureChange', mapping.parentVid, mapping.role, temperature);
+    return true;
+  }
+
+  private getThermostatTemperatureChild(
+    object: any,
+    thermostatVids: Set<string>,
+  ): { parentVid: string; role: ThermostatTemperatureRole } | undefined {
+    const parentVid = this.getParentVid(object) ?? this.getNearbyThermostatVid(object, thermostatVids);
+    if (!parentVid || !thermostatVids.has(parentVid)) return undefined;
+
+    const role = this.getThermostatTemperatureRole(object);
+    if (!role) return undefined;
+
+    return { parentVid, role };
+  }
+
+  private isThermostatHelperDryContact(object: any, thermostatVids: Set<string>): boolean {
+    if (!this.getNearbyThermostatVid(object, thermostatVids)) return false;
+
+    const label = this.normalizedObjectLabel(object);
+    return label === 'fan' ||
+      label === 'night mode' ||
+      /^cool \d+$/.test(label) ||
+      /^heat \d+$/.test(label);
+  }
+
+  private getNearbyThermostatVid(object: any, thermostatVids: Set<string>): string | undefined {
+    const vid = Number.parseInt(String(object?.VID), 10);
+    if (!Number.isFinite(vid)) return undefined;
+
+    const nearby = [...thermostatVids]
+      .map((candidate) => Number.parseInt(candidate, 10))
+      .filter((candidate) => Number.isFinite(candidate) && candidate < vid && vid - candidate <= 10)
+      .sort((a, b) => b - a)[0];
+
+    return nearby === undefined ? undefined : String(nearby);
+  }
+
+  private getParentVid(object: any): string | undefined {
+    const candidates = [
+      object?.ParentVID,
+      object?.ParentVid,
+      object?.Parent,
+      object?.ParentID,
+      object?.ParentId,
+      object?.OwnerVID,
+      object?.Owner,
+      object?.parent?.VID,
+      object?.Parent?.VID,
+    ];
+
+    for (const candidate of candidates) {
+      if (candidate === undefined || candidate === null) continue;
+      const normalized = String(candidate).trim();
+      if (/^\d+$/.test(normalized)) return normalized;
+    }
+
+    return undefined;
+  }
+
+  private getThermostatTemperatureRole(object: any): ThermostatTemperatureRole | undefined {
+    const position = Number(object?.Position ?? object?.ParentPosition ?? object?.ChildPosition ?? object?.Index);
+    if (position === 1) return 'indoor';
+    if (position === 3) return 'cool';
+    if (position === 4) return 'heat';
+
+    const label = this.normalizedObjectLabel(object);
+    if (label.includes('indoor') || label.includes('room') || label.includes('internal sensor')) return 'indoor';
+    if (label.includes('cool')) return 'cool';
+    if (label.includes('heat')) return 'heat';
+
+    return undefined;
+  }
+
+  private normalizedObjectLabel(object: any): string {
+    return String(`${object?.DName ?? ''} ${object?.Name ?? ''} ${object?.Description ?? ''}`)
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
   }
 
   private async loadPersistentCache(): Promise<VantageDevice[]> {
@@ -627,7 +1162,7 @@ export class VantageInfusion extends EventEmitter {
       };
   
       const onData = (socket: net.Socket | tls.TLSSocket) => {
-        this.opts.log.info('load dc file'); // legacy
+        this.opts.log.debug('Starting Vantage configuration download');
 
       let buffer = '';
         let controller = 1;
@@ -649,8 +1184,8 @@ export class VantageInfusion extends EventEmitter {
         }, 750);
   
         const writeOpenFilter = () => {
-          const type = OBJECT_TYPES[writeCount];
-          this.opts.log.info(`parse Json: ${type} on controller: ${controller.toString()}`); // legacy text, visible
+          const type = CONFIG_OBJECT_TYPES[writeCount];
+          this.opts.log.debug(`Requesting Vantage object type ${type} on controller ${controller.toString()}`);
           socket.write(
             `<?Master ${controller}?>` +
             `<IConfiguration><OpenFilter><call><Objects><ObjectType>${type}</ObjectType></Objects></call></OpenFilter></IConfiguration>\n`,
@@ -662,18 +1197,41 @@ export class VantageInfusion extends EventEmitter {
         let loginFallback: NodeJS.Timeout | null = null;
         const clearLoginFallback = () => { if (loginFallback) { clearTimeout(loginFallback); loginFallback = null; } };
   
-        if (this.opts.username && this.opts.password) {
-          this.opts.log.info('Kickoff: sending <ILogin>');
+        const writeLogin = (username: string) => {
+          this.opts.log.debug(`Sending Vantage configuration login request as ${username}`);
           socket.write(
-            `<ILogin><Login><call><User>${this.opts.username}</User><Password>${this.opts.password}</Password></call></Login></ILogin>\n`,
+            `<ILogin><Login><call><User>${username}</User><Password>${this.opts.password}</Password></call></Login></ILogin>\n`,
           );
           progress();
+        };
+
+        let loginUsername = this.opts.username;
+        let triedAlternateUsername = false;
+        const scheduleLoginFallback = () => {
+          clearLoginFallback();
           loginFallback = setTimeout(() => {
-            this.opts.log.warn('Login response timeout — calling writeOpenFilter() anyway');
+            const alternateUsername = alternateVantageUsername(loginUsername);
+            if (alternateUsername && !triedAlternateUsername) {
+              triedAlternateUsername = true;
+              loginUsername = alternateUsername;
+              this.opts.log.warn(
+                `Vantage login as ${this.opts.username} timed out; retrying as ${alternateUsername}.`,
+              );
+              writeLogin(alternateUsername);
+              scheduleLoginFallback();
+              return;
+            }
+
+            this.opts.log.warn('Vantage login response timed out; attempting configuration download anyway.');
             writeOpenFilter();
           }, 2500);
+        };
+
+        if (this.hasCredentials()) {
+          writeLogin(loginUsername);
+          scheduleLoginFallback();
         } else {
-          this.opts.log.info('Kickoff: writeOpenFilter() (no login)');
+          this.opts.log.debug('No Vantage username/password configured; attempting unauthenticated configuration download');
           writeOpenFilter();
         }
   
@@ -688,13 +1246,32 @@ export class VantageInfusion extends EventEmitter {
             // ----- LOGIN -----
             if (parsed?.ILogin?.Login) {
               const ok = String(parsed.ILogin.Login.return) === 'true';
-              if (ok) this.opts.log.info('Login successful');
-              else this.opts.log.warn('Login failed trying to get data anyways');
               buffer = '';
-              clearLoginFallback();
-              writeCount = 0;
-              writeOpenFilter();
-              // return;
+              if (ok) {
+                this.opts.log.info(`Login successful as ${loginUsername}`);
+                this.rememberSuccessfulUsername(loginUsername);
+                clearLoginFallback();
+                writeCount = 0;
+                writeOpenFilter();
+              } else {
+                const alternateUsername = alternateVantageUsername(loginUsername);
+                if (alternateUsername && !triedAlternateUsername) {
+                  triedAlternateUsername = true;
+                  loginUsername = alternateUsername;
+                  this.opts.log.warn(
+                    `Vantage controller rejected username ${this.opts.username}; retrying as ${alternateUsername}.`,
+                  );
+                  writeLogin(alternateUsername);
+                  scheduleLoginFallback();
+                } else {
+                  this.opts.log.error(
+                    'Vantage controller rejected the configured username/password. Check the Homebridge plugin credentials.',
+                  );
+                  clearLoginFallback();
+                  writeCount = 0;
+                  writeOpenFilter();
+                }
+              }
             }
   
             // ----- OPEN FILTER (handle) -----
@@ -707,7 +1284,7 @@ export class VantageInfusion extends EventEmitter {
                     controller = parseInt(res[0])
                   } catch { /* ignore */ }
               } else {
-                  this.opts.log.info("breaking")
+                  this.opts.log.debug('Reached end of Vantage controller configuration objects');
                   shouldBreak = true;
                 }
               }
@@ -730,7 +1307,7 @@ export class VantageInfusion extends EventEmitter {
               const list = Array.isArray(elements) ? elements : [elements];
   
               for (const el of list) {
-                const type = OBJECT_TYPES[writeCount - 1];
+                const type = CONFIG_OBJECT_TYPES[writeCount - 1];
                 const item = el[type] ?? el; // tolerate firmwares that return without type wrapper
                 if (item) item.ObjectType = type;
                 const elemDict: any = {};
@@ -739,7 +1316,7 @@ export class VantageInfusion extends EventEmitter {
                 }
   
               buffer = '';
-              if (writeCount >= OBJECT_TYPES.length) {
+              if (writeCount >= CONFIG_OBJECT_TYPES.length) {
                 controller++;
                 writeCount = 0;
               }
@@ -749,7 +1326,7 @@ export class VantageInfusion extends EventEmitter {
 
             if (parsed?.IConfiguration?.GetFilterResults) {
             buffer = '';
-              if (writeCount >= OBJECT_TYPES.length) {
+              if (writeCount >= CONFIG_OBJECT_TYPES.length) {
               controller++;
               writeCount = 0;
             }
@@ -768,7 +1345,7 @@ export class VantageInfusion extends EventEmitter {
         });
   
         socket.on('end', () => {
-          this.opts.log.info("ending" + shouldBreak)
+          this.opts.log.debug(`Vantage configuration socket ended; completed=${shouldBreak}`);
           if ((finishOnce as any)._done) return;
           if (!(finishOnce as any)._done && readObjects.length) {
             const xml = this.buildCacheXml(readObjects);
@@ -1001,4 +1578,8 @@ export class VantageInfusion extends EventEmitter {
     this.isInsecureCfg = false;
     return this.discoverDevices();
   }
+}
+
+export function alternateVantageUsername(username: string): string | undefined {
+  return username.trim().toLowerCase() === 'admin' ? 'administrator' : undefined;
 }

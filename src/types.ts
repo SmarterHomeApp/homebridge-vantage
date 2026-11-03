@@ -1,4 +1,12 @@
-export type VantageType = 'relay' | 'dimmer' | 'rgb' | 'blind' | 'thermostat';
+export type VantageType =
+  | 'relay'
+  | 'dimmer'
+  | 'rgb'
+  | 'blind'
+  | 'thermostat'
+  | 'contact'
+  | 'temperatureSensor'
+  | 'lightSensor';
 
 export interface VantageDeviceBase {
   name: string;
@@ -48,15 +56,42 @@ export interface VantageThermostat extends VantageDeviceBase {
   units: 0 | 1; // 0 C, 1 F
 }
 
-export type VantageDevice = VantageRelay | VantageDimmer | VantageRGB | VantageBlind | VantageThermostat;
+export interface VantageContact extends VantageDeviceBase {
+  type: 'contact';
+  contact: boolean;
+}
+
+export interface VantageTemperatureSensor extends VantageDeviceBase {
+  type: 'temperatureSensor';
+  temperature: number;
+}
+
+export interface VantageLightSensor extends VantageDeviceBase {
+  type: 'lightSensor';
+  lightLevel: number;
+}
+
+export type VantageDevice =
+  | VantageRelay
+  | VantageDimmer
+  | VantageRGB
+  | VantageBlind
+  | VantageThermostat
+  | VantageContact
+  | VantageTemperatureSensor
+  | VantageLightSensor;
 
 export interface VantageConfig {
   platform: 'VantageControls';
-  ipaddress: string;
+  ipaddress?: string;
   username?: string;
   password?: string;
   usecache?: boolean;
   omit?: string;
   range?: string;
   forceSSL?: boolean;
+  includeLights?: boolean;
+  includeBlinds?: boolean;
+  includeThermostats?: boolean;
+  includeSensors?: boolean;
 }

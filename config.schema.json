@@ -10,28 +10,27 @@
       "name": {
         "title": "Name",
         "type": "string",
-        "default": "VantageControls",
-        "description": "A label for this platform entry."
+        "default": "Vantage Controls",
+        "description": "A label for this platform entry. This is not the Homebridge platform identifier."
       },
       "ipaddress": {
         "title": "Controller IP",
         "type": "string",
-        "format": "ipv4",
         "placeholder": "192.168.1.50",
-        "description": "IP address of your Vantage InFusion controller."
+        "description": "IP address of your Vantage InFusion controller. Leave blank to discover an InFusion controller using mDNS."
       },
       "username": {
         "title": "Username",
         "type": "string",
         "placeholder": "optional",
-        "description": "Only needed if your controller requires login."
+        "description": "Only needed if your controller requires login. If login is rejected or times out, discovery still continues."
       },
       "password": {
         "title": "Password",
         "type": "string",
         "format": "password",
         "placeholder": "optional",
-        "description": "Only needed if your controller requires login."
+        "description": "Only needed if your controller requires login. Used with Username."
       },
       "forceSSL": {
         "title": "Force SSL",
@@ -43,7 +42,31 @@
         "title": "Use Local Cache",
         "type": "boolean",
         "default": true,
-        "description": "Use previously downloaded configuration (if present) to speed up startup."
+        "description": "Maintain a persistent last-known-good configuration fallback while still attempting fresh discovery on startup."
+      },
+      "includeLights": {
+        "title": "Include Lights and Loads",
+        "type": "boolean",
+        "default": true,
+        "description": "Create HomeKit accessories for Vantage loads, dimmers, relays, RGB loads, and similar switch/light devices."
+      },
+      "includeBlinds": {
+        "title": "Include Blinds and Shades",
+        "type": "boolean",
+        "default": true,
+        "description": "Create HomeKit accessories for Vantage blinds, shades, and window coverings."
+      },
+      "includeThermostats": {
+        "title": "Include Thermostats",
+        "type": "boolean",
+        "default": true,
+        "description": "Create HomeKit accessories for Vantage thermostats and HVAC zones."
+      },
+      "includeSensors": {
+        "title": "Include Sensors and Contacts",
+        "type": "boolean",
+        "default": true,
+        "description": "Create HomeKit accessories for dry contacts, temperature sensors, light sensors, and Omni sensors."
       },
       "omit": {
         "title": "Omit VIDs",
@@ -54,12 +77,12 @@
       "range": {
         "title": "VID Range",
         "type": "string",
-        "default": "0,999999999",
-        "placeholder": "0,999999999",
-        "description": "Include only VIDs within this inclusive range, e.g. 0,5000. If you have more than 140 loads, add 2 instances of the vantage platform with different ranges."
+        "default": "0-999999999",
+        "placeholder": "0-999999999",
+        "description": "Include only VIDs within this inclusive range, e.g. 0-5000. Legacy comma format such as 0,5000 is still supported. If you have more than 140 accessories, add another VantageControls platform with a different range. On Homebridge 2, every extra instance must be a child bridge."
       }
     },
-    "required": ["name", "ipaddress"],
+    "required": ["name"],
     "additionalProperties": false
   },
 
@@ -73,6 +96,13 @@
     },
     "forceSSL",
     "usecache",
+    {
+      "type": "fieldset",
+      "title": "Device Types",
+      "expandable": true,
+      "expanded": true,
+      "items": ["includeLights", "includeBlinds", "includeThermostats", "includeSensors"]
+    },
     {
       "type": "fieldset",
       "title": "Advanced",

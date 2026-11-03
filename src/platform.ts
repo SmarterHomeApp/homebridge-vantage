@@ -11,6 +11,7 @@ import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
 import { VantageInfusion } from './vantageInfusion';
 import type { VantageDevice } from './types';
 import { VantagePlatformAccessory } from './platformAccessory';
+import { sanitizeHomeKitName } from './homekitName';
 
 export class VantagePlatform implements DynamicPlatformPlugin {
   public readonly accessories: PlatformAccessory[] = [];
@@ -19,26 +20,31 @@ export class VantagePlatform implements DynamicPlatformPlugin {
   private syncedOnce = false; // prevent double-sync when both event + promise fire
   private accessoriesByVid = new Map<string, PlatformAccessory>();
   private realtimeWired = false;
+  private invalidThermostatWarnings = new Set<string>();
 
   constructor(
     public readonly log: Logger,
     public readonly config: PlatformConfig,
     public readonly api: API,
   ) {
-    if (!config || !config.ipaddress) {
-      this.log.error(`[${PLATFORM_NAME}] Missing required config "ipaddress" — plugin will not start.`);
+    if (!config) {
+      this.log.error(`[${PLATFORM_NAME}] Missing platform config — plugin will not start.`);
       return;
     }
 
     // Construct infusion
     this.infusion = new VantageInfusion({
-      ipaddress: String(config.ipaddress),
+      ipaddress: config.ipaddress ? String(config.ipaddress) : '',
       username: (config as any).username ?? '',
       password: (config as any).password ?? '',
       usecache: (config as any).usecache ?? true,
       omit: (config as any).omit ?? '',
-      range: (config as any).range ?? '0,999999999',
+      range: (config as any).range ?? '0-999999999',
       forceSSL: (config as any).forceSSL ?? false,
+      includeLights: (config as any).includeLights ?? true,
+      includeBlinds: (config as any).includeBlinds ?? true,
+      includeThermostats: (config as any).includeThermostats ?? true,
+      includeSensors: (config as any).includeSensors ?? true,
       storagePath: this.api.user.storagePath(),
       log: this.log,
     });
@@ -102,7 +108,7 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       const d = wanted.get(acc.UUID);
       if (d) {
         // Update name/context and re-bind
-        acc.displayName = d.name;
+        acc.displayName = sanitizeHomeKitName(d.name, `VID ${d.vid}`);
         acc.context.device = d;
         new VantagePlatformAccessory(this, acc);
         seen.add(acc.UUID);
@@ -123,7 +129,7 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       const uuid = uuidFor(d);
       if (seen.has(uuid)) continue;
 
-      const acc = new this.api.platformAccessory(d.name, uuid);
+      const acc = new this.api.platformAccessory(sanitizeHomeKitName(d.name, `VID ${d.vid}`), uuid);
       acc.context.device = d;
       new VantagePlatformAccessory(this, acc);
       toRegister.push(acc);
@@ -270,14 +276,15 @@ export class VantagePlatform implements DynamicPlatformPlugin {
       if (!acc) return;
 
       const dev = acc.context.device as VantageDevice;
-      let temperature = Number(temp);
-      
-      // Validate temperature range (from original code)
-      if (temperature > 100) {
-        temperature = 100;
-        this.log.warn(`Thermostat ${vid} reported invalid temperature ${temp}°C, capping at 100°C`);
+      const temperature = this.normalizeCurrentTemperature(temp);
+      if (temperature === undefined) {
+        this.logInvalidThermostatValue(
+          `${vid}:current`,
+          `Thermostat ${vid} reported invalid temperature ${temp}; ignoring update`,
+        );
+        return;
       }
-      
+
       (dev as any).temperature = temperature;
       this.log.info(`thermostatIndoorTemperatureChange (VID=${vid}, Name=${dev.name}, Temp=${temperature})`);
 
@@ -311,26 +318,131 @@ export class VantagePlatform implements DynamicPlatformPlugin {
         (dev as any).current = current; // Store the calculated current state
         svc.updateCharacteristic(C.CurrentHeatingCoolingState, current);
         svc.updateCharacteristic(C.TargetHeatingCoolingState, mode);
+        this.ensureValidThermostatSetpoints(dev, svc);
       } else {
-        (dev as any).targetTemp = Math.min(38, targetTemp);
+        const normalizedTarget = this.normalizeTargetTemperature(targetTemp);
+        if (normalizedTarget === undefined) {
+          this.logInvalidThermostatValue(
+            `${vid}:target`,
+            `Thermostat ${vid} reported invalid target temperature ${targetTemp}; ignoring setpoint update`,
+          );
+          svc.updateCharacteristic(C.TargetHeatingCoolingState, mode);
+          this.ensureValidThermostatSetpoints(dev, svc);
+          return;
+        }
+
+        (dev as any).mode = mode;
+        (dev as any).targetTemp = normalizedTarget;
         if (mode === 1) {
-          (dev as any).heating = Math.min(25, targetTemp); // HomeKit max is 25°C
+          (dev as any).heating = Math.min(25, normalizedTarget); // HomeKit max is 25°C
           svc.updateCharacteristic(C.HeatingThresholdTemperature, (dev as any).heating);
         } else if (mode === 2) {
-          (dev as any).cooling = Math.min(35, targetTemp);
+          (dev as any).cooling = Math.min(35, normalizedTarget);
           svc.updateCharacteristic(C.CoolingThresholdTemperature, (dev as any).cooling);
         }
 
         // Update target temperature based on mode (from original logic)
-        if ((dev as any).mode === 1) (dev as any).targetTemp = (dev as any).heating;
-        else if ((dev as any).mode === 2) (dev as any).targetTemp = (dev as any).cooling;
-        else if ((dev as any).mode === 3) (dev as any).targetTemp = ((dev as any).temperature <= (dev as any).heating) ? (dev as any).heating : (dev as any).cooling;
+        if ((dev as any).mode === 1 && this.isValidTargetTemperature((dev as any).heating)) {
+          (dev as any).targetTemp = (dev as any).heating;
+        } else if ((dev as any).mode === 2 && this.isValidTargetTemperature((dev as any).cooling)) {
+          (dev as any).targetTemp = (dev as any).cooling;
+        } else if ((dev as any).mode === 3) {
+          const target = this.resolveAutoModeTargetTemperature(dev);
+          if (target !== undefined) {
+            (dev as any).targetTemp = target;
+          }
+        }
 
-        svc.updateCharacteristic(C.TargetTemperature, (dev as any).targetTemp);
+        if (this.isValidTargetTemperature((dev as any).targetTemp)) {
+          svc.updateCharacteristic(C.TargetTemperature, (dev as any).targetTemp);
+        }
         svc.updateCharacteristic(C.TargetHeatingCoolingState, (dev as any).mode);
         
         // this.log.info(`After update - dev.mode=${dev.mode}, dev.targetTemp=${dev.targetTemp}, dev.heating=${dev.heating}, dev.cooling=${dev.cooling}`);
       }
+    });
+
+    this.infusion.on('thermostatChildTemperatureChange', (vid: string, role: string, temperature: number) => {
+      const acc = this.accessoriesByVid.get(String(vid));
+      if (!acc) return;
+
+      const dev = acc.context.device as any;
+      const svc = acc.getService(S.Thermostat);
+      if (!svc || !dev || dev.type !== 'thermostat') return;
+
+      const normalized = role === 'indoor'
+        ? this.normalizeCurrentTemperature(temperature)
+        : this.normalizeTargetTemperature(temperature);
+      if (normalized === undefined) {
+        this.logInvalidThermostatValue(
+          `${vid}:${role}`,
+          `Thermostat ${vid} reported invalid ${role} temperature ${temperature}; ignoring update`,
+        );
+        return;
+      }
+
+      if (role === 'indoor') {
+        dev.temperature = normalized;
+        svc.updateCharacteristic(C.CurrentTemperature, normalized);
+        return;
+      }
+
+      if (role === 'heat') {
+        dev.heating = normalized;
+        svc.updateCharacteristic(C.HeatingThresholdTemperature, Math.min(25, Math.max(10, normalized)));
+        if (dev.mode === 1) {
+          dev.targetTemp = normalized;
+          svc.updateCharacteristic(C.TargetTemperature, normalized);
+        }
+        return;
+      }
+
+      if (role === 'cool') {
+        dev.cooling = normalized;
+        svc.updateCharacteristic(C.CoolingThresholdTemperature, Math.min(35, Math.max(10, normalized)));
+        if (dev.mode === 2) {
+          dev.targetTemp = normalized;
+          svc.updateCharacteristic(C.TargetTemperature, normalized);
+        }
+      }
+    });
+
+    this.infusion.on('contactStatusChange', (vid: number, contact: boolean) => {
+      const acc = this.accessoriesByVid.get(String(vid));
+      if (!acc) return;
+
+      const dev = acc.context.device as VantageDevice;
+      if (!dev || dev.type !== 'contact') return;
+
+      (dev as any).contact = contact;
+      acc.getService(S.ContactSensor)?.updateCharacteristic(
+        C.ContactSensorState,
+        contact ? C.ContactSensorState.CONTACT_DETECTED : C.ContactSensorState.CONTACT_NOT_DETECTED,
+      );
+    });
+
+    this.infusion.on('temperatureSensorChange', (vid: number, temperature: number) => {
+      const acc = this.accessoriesByVid.get(String(vid));
+      if (!acc) return;
+
+      const dev = acc.context.device as VantageDevice;
+      if (!dev || dev.type !== 'temperatureSensor') return;
+
+      const normalized = Math.min(100, Math.max(-50, Number(temperature)));
+      (dev as any).temperature = normalized;
+      acc.getService(S.TemperatureSensor)?.updateCharacteristic(C.CurrentTemperature, normalized);
+    });
+
+    this.infusion.on('lightSensorChange', (vid: number, lightLevel: number) => {
+      const acc = this.accessoriesByVid.get(String(vid));
+      if (!acc) return;
+
+      const dev = acc.context.device as VantageDevice;
+      if (!dev || dev.type !== 'lightSensor') return;
+
+      const normalized = Math.max(0.0001, Math.min(100000, Number(lightLevel)));
+      (dev as any).lightLevel = normalized;
+      acc.getService(S.LightSensor)?.updateCharacteristic(C.CurrentAmbientLightLevel, normalized);
     });
   }
 
@@ -338,6 +450,62 @@ export class VantagePlatform implements DynamicPlatformPlugin {
     // Legacy “store/open for business” logs
     this.log.warn('VantagePlatform for InFusion Controller (end configuration store)');
     this.log.warn('VantagePlatform for InFusion Controller (is open for business)');
+  }
+
+  private normalizeCurrentTemperature(value: number): number | undefined {
+    const temperature = Number(value);
+    if (!Number.isFinite(temperature) || temperature <= -100 || temperature >= 900) return undefined;
+    return Math.min(100, Math.max(-50, temperature));
+  }
+
+  private normalizeTargetTemperature(value: number): number | undefined {
+    const temperature = Number(value);
+    if (!Number.isFinite(temperature) || temperature < 1 || temperature >= 900) return undefined;
+    return Math.min(38, Math.max(10, temperature));
+  }
+
+  private isValidTargetTemperature(value: unknown): value is number {
+    const temperature = Number(value);
+    return Number.isFinite(temperature) && temperature >= 10 && temperature <= 38;
+  }
+
+  private ensureValidThermostatSetpoints(dev: any, svc: { updateCharacteristic: (characteristic: unknown, value: number) => unknown }) {
+    const C = this.api.hap.Characteristic;
+    if (!this.isValidTargetTemperature(dev.targetTemp)) {
+      dev.targetTemp = 20;
+      svc.updateCharacteristic(C.TargetTemperature, 20);
+    }
+    if (!this.isValidTargetTemperature(dev.heating)) {
+      dev.heating = 20;
+      svc.updateCharacteristic(C.HeatingThresholdTemperature, 20);
+    }
+    if (!this.isValidTargetTemperature(dev.cooling)) {
+      dev.cooling = 25;
+      svc.updateCharacteristic(C.CoolingThresholdTemperature, 25);
+    }
+  }
+
+  private resolveAutoModeTargetTemperature(dev: any): number | undefined {
+    const heating = this.isValidTargetTemperature(dev.heating) ? Number(dev.heating) : undefined;
+    const cooling = this.isValidTargetTemperature(dev.cooling) ? Number(dev.cooling) : undefined;
+
+    if (heating === undefined && cooling === undefined) return undefined;
+    if (heating === undefined) return cooling;
+    if (cooling === undefined) return heating;
+
+    const current = this.normalizeCurrentTemperature(dev.temperature);
+    if (current === undefined) return cooling;
+
+    return current <= heating ? heating : cooling;
+  }
+
+  private logInvalidThermostatValue(key: string, message: string) {
+    if (this.invalidThermostatWarnings.has(key)) {
+      return;
+    }
+
+    this.invalidThermostatWarnings.add(key);
+    this.log.warn(`${message}. Future repeats will be suppressed.`);
   }
 
   // Exposed for accessory class

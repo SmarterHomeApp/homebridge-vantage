@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-11-02
+
+### Added
+- mDNS discovery when no controller IP is configured, or when the configured address does not respond. Reconnects also retry discovery after a power-cycle IP change.
+- Include flags for lights, blinds, thermostats, and sensors.
+- If login as `admin` fails or times out, retry as `administrator` before continuing unauthenticated discovery.
+- Broader discovery: original Vantage families plus extra load, blind, thermostat, and sensor types classified by exact family first, then capability fields.
+- HomeKit name sanitization for HAP 2.3 (`"`, `?`, trailing punctuation).
+- Tests for cache safety, VID ranges, include flags, classification, thermostat sentinels, and HomeKit names.
+
+### Changed
+- Fresh controller download is always attempted first. The persistent cache is only a last-known-good fallback.
+- Invalid thermostat values such as `999` or `0` are ignored or replaced with legal HomeKit setpoints so pairing does not stall.
+- Config UI and README now treat `name` as a label, `ipaddress` as optional, and document Homebridge 2 child-bridge splits.
+
+### Fixed
+- Thermostat helper dry contacts and child temperature objects are no longer registered as standalone sensors.
+
 ## [1.0.2] - 2025-09-11
 
 ### Fixed

@@ -2,6 +2,7 @@
 import type { PlatformAccessory, Service, Characteristic } from 'homebridge';
 import type { VantageDevice } from './types';
 import { VantagePlatform } from './platform';
+import { sanitizeHomeKitName } from './homekitName';
 
 export class VantagePlatformAccessory {
   private Service: typeof Service;
@@ -29,9 +30,12 @@ export class VantagePlatformAccessory {
       this.accessory.getService(this.Service.AccessoryInformation) ??
       this.accessory.addService(this.Service.AccessoryInformation);
 
+    const homeKitName = sanitizeHomeKitName(device.name, `VID ${device.vid}`);
+    this.accessory.displayName = homeKitName;
+
     info.setCharacteristic(this.Characteristic.Manufacturer, 'Vantage Controls');
     info.setCharacteristic(this.Characteristic.Model, device.objectType ?? device.type);
-    info.setCharacteristic(this.Characteristic.Name, device.name);
+    info.setCharacteristic(this.Characteristic.Name, homeKitName);
     info.setCharacteristic(this.Characteristic.SerialNumber, `VID ${device.vid}`);
 
     // Build the correct primary service for the type
@@ -143,10 +147,7 @@ export class VantagePlatformAccessory {
         
         this.platform.getInfusion().setThermostatTarget(device.address, Number(value), dev.mode, dev.heating, dev.cooling);
       });
-      tgt.onGet(() => {
-        const dev = this.accessory.context.device as any;
-        return dev?.targetTemp ?? 20;
-      });
+      tgt.onGet(() => this.hapTargetTemperature((this.accessory.context.device as any)?.targetTemp));
 
       // Target Heating/Cooling State
       const mode = primary.getCharacteristic(this.Characteristic.TargetHeatingCoolingState);
@@ -192,19 +193,20 @@ export class VantagePlatformAccessory {
       // Heating Threshold Temperature
       const heatingThreshold = primary.getCharacteristic(this.Characteristic.HeatingThresholdTemperature);
       heatingThreshold.removeAllListeners('get');
-      heatingThreshold.onGet(() => {
-        const dev = this.accessory.context.device as any;
-        const heating = dev?.heating ?? 20;
-        return Math.min(25, Math.max(10, heating)); // Clamp to valid range (10-25°C)
-      });
+      heatingThreshold.onGet(() => this.hapHeatingThreshold((this.accessory.context.device as any)?.heating));
 
       // Cooling Threshold Temperature
       const coolingThreshold = primary.getCharacteristic(this.Characteristic.CoolingThresholdTemperature);
       coolingThreshold.removeAllListeners('get');
-      coolingThreshold.onGet(() => {
-        const dev = this.accessory.context.device as any;
-        return dev?.cooling ?? 25;
-      });
+      coolingThreshold.onGet(() => this.hapCoolingThreshold((this.accessory.context.device as any)?.cooling));
+
+      const thermostat = device as any;
+      thermostat.targetTemp = this.hapTargetTemperature(thermostat.targetTemp);
+      thermostat.heating = this.hapHeatingThreshold(thermostat.heating);
+      thermostat.cooling = this.hapCoolingThreshold(thermostat.cooling);
+      tgt.updateValue(thermostat.targetTemp);
+      heatingThreshold.updateValue(thermostat.heating);
+      coolingThreshold.updateValue(thermostat.cooling);
 
       // Initialize thermostat state (from original code)
       this.platform.getInfusion().Thermostat_GetIndoorTemperature(device.address);
@@ -215,13 +217,58 @@ export class VantagePlatformAccessory {
       this.accessory.category = this.platform.api.hap.Categories.THERMOSTAT;
     }
 
+    if (device.type === 'contact') {
+      primary =
+        this.accessory.getService(this.Service.ContactSensor) ??
+        this.accessory.addService(this.Service.ContactSensor, this.accessory.displayName);
+
+      const state = primary.getCharacteristic(this.Characteristic.ContactSensorState);
+      state.removeAllListeners('get');
+      state.onGet(() => {
+        const dev = this.accessory.context.device as any;
+        return dev?.contact ? this.Characteristic.ContactSensorState.CONTACT_DETECTED : this.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED;
+      });
+
+      this.accessory.category = this.platform.api.hap.Categories.SENSOR;
+    }
+
+    if (device.type === 'temperatureSensor') {
+      primary =
+        this.accessory.getService(this.Service.TemperatureSensor) ??
+        this.accessory.addService(this.Service.TemperatureSensor, this.accessory.displayName);
+
+      const temperature = primary.getCharacteristic(this.Characteristic.CurrentTemperature);
+      temperature.removeAllListeners('get');
+      temperature.onGet(() => {
+        const dev = this.accessory.context.device as any;
+        return Math.min(100, Math.max(-50, Number(dev?.temperature ?? 0)));
+      });
+
+      this.accessory.category = this.platform.api.hap.Categories.SENSOR;
+    }
+
+    if (device.type === 'lightSensor') {
+      primary =
+        this.accessory.getService(this.Service.LightSensor) ??
+        this.accessory.addService(this.Service.LightSensor, this.accessory.displayName);
+
+      const lightLevel = primary.getCharacteristic(this.Characteristic.CurrentAmbientLightLevel);
+      lightLevel.removeAllListeners('get');
+      lightLevel.onGet(() => {
+        const dev = this.accessory.context.device as any;
+        return Math.max(0.0001, Math.min(100000, Number(dev?.lightLevel ?? 0.0001)));
+      });
+
+      this.accessory.category = this.platform.api.hap.Categories.SENSOR;
+    }
+
     if (!primary) {
       this.platform.log.warn(`Unsupported device type ${device.type} for ${this.accessory.displayName}`);
       return;
     }
 
-    primary.displayName = device.name;
-    primary.setCharacteristic(this.Characteristic.Name, device.name);
+    primary.displayName = homeKitName;
+    primary.setCharacteristic(this.Characteristic.Name, homeKitName);
 
     // Mark primary (helps Home app pick the right tile)
     try {
@@ -246,5 +293,23 @@ export class VantagePlatformAccessory {
         // ignore if Homebridge version doesn’t support removal
       }
     }
+  }
+
+  private hapTargetTemperature(value: unknown, fallback = 20): number {
+    const temperature = Number(value);
+    if (!Number.isFinite(temperature) || temperature < 10 || temperature > 38) return fallback;
+    return temperature;
+  }
+
+  private hapHeatingThreshold(value: unknown, fallback = 20): number {
+    const temperature = Number(value);
+    if (!Number.isFinite(temperature) || temperature < 10 || temperature > 25) return fallback;
+    return temperature;
+  }
+
+  private hapCoolingThreshold(value: unknown, fallback = 25): number {
+    const temperature = Number(value);
+    if (!Number.isFinite(temperature) || temperature < 10 || temperature > 35) return fallback;
+    return temperature;
   }
 }
