@@ -65,10 +65,9 @@ const CONFIG_OBJECT_TYPES = CONFIGURATION_CONTROLLERS.flatMap((controller) => co
 
 const DISCOVERABLE_OBJECT_TYPES = CONFIG_OBJECT_TYPES.filter((type) => type !== 'Area');
 
-// Organize Home reads /tmp/vantage.dc. Lighting relays stay: they are Load objects.
-// DryContact/Temperature/OmniSensor use Area 0, and the iOS organizer aborts when a
-// HomeKit VID maps to a missing room. Formula/Track nested objects are also unused.
-const LEGACY_TMP_EXCLUDED_TYPES = new Set(['DryContact', 'Temperature', 'LightSensor', 'OmniSensor']);
+// Organize Home (`Organizer.swift`) matches HomeKit serial numbers to dump VIDs, then
+// rooms via VantageAccessory.Area. sanitizeXml stores that as AreaID, so the dump
+// copies AreaID back onto Area.
 
 interface Options {
   ipaddress: string;
@@ -1257,10 +1256,37 @@ export class VantageInfusion extends EventEmitter {
   }
 
   private objectsForLegacyTmpDump(objects: any[]): any[] {
-    return objects.filter((raw) => {
+    return objects.map((raw) => {
       const key = Object.keys(raw)[0];
-      return Boolean(key) && !LEGACY_TMP_EXCLUDED_TYPES.has(key);
+      if (!key || !raw[key] || typeof raw[key] !== 'object' || Array.isArray(raw[key])) return raw;
+      const body = raw[key] as Record<string, unknown>;
+      const areaVid = VantageInfusion.organizeHomeAreaVid(body);
+      if (!areaVid) return raw;
+      return { [key]: { ...body, Area: areaVid } };
     });
+  }
+
+  /** 1.0.8 xml2json wrote this as `Area`; xml2js keeps Infusion's `AreaID`. */
+  private static organizeHomeAreaVid(body: Record<string, unknown> | undefined): string {
+    if (!body) return '';
+    const direct = body.Area;
+    if (direct !== undefined && direct !== null && typeof direct !== 'object' && String(direct) !== '') {
+      return String(direct);
+    }
+    if (direct && typeof direct === 'object' && !Array.isArray(direct)) {
+      const nested = direct as Record<string, unknown>;
+      if (nested._ !== undefined && nested._ !== null && typeof nested._ !== 'object' && String(nested._) !== '') {
+        return String(nested._);
+      }
+      if (nested.VID !== undefined && nested.VID !== null && typeof nested.VID !== 'object' && String(nested.VID) !== '') {
+        return String(nested.VID);
+      }
+    }
+    const areaId = body.AreaID;
+    if (areaId !== undefined && areaId !== null && typeof areaId !== 'object' && String(areaId) !== '') {
+      return String(areaId);
+    }
+    return '';
   }
 
   private pullConfigurationXml(): Promise<string> {
@@ -1585,7 +1611,7 @@ export class VantageInfusion extends EventEmitter {
       fs.renameSync(tmpPath, cachePath);
       this.opts.log.info(
         `Legacy /tmp Vantage cache mirror updated at ${cachePath} ` +
-          `(${validation.relevantObjectCount} Organize Home objects; sensors omitted)`,
+          `(${validation.relevantObjectCount} Organize Home objects)`,
       );
     } catch (error) {
       try {

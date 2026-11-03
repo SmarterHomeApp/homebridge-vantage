@@ -577,7 +577,7 @@ test('persistent cache fallback refreshes the Organize Home /tmp dump', async ()
   assert.equal(fs.readFileSync(tmpMirrorPath, 'utf8'), cachedXml);
 });
 
-test('Organize Home tmp dump keeps relay loads and omits Area-0 sensors', async () => {
+test('Organize Home tmp dump copies AreaID onto Area so iOS can map rooms', async () => {
   const storagePath = fs.mkdtempSync(path.join(os.tmpdir(), 'vantage-cache-test-'));
   const tmpMirrorPath = path.join(storagePath, 'vantage.dc');
   const infusion = makeInfusionWithOptions({
@@ -586,24 +586,31 @@ test('Organize Home tmp dump keeps relay loads and omits Area-0 sensors', async 
   });
 
   const xml = configuration([
-    ...loads(2, 20),
+    xmlObject('Area', { VID: 10, ObjectType: 'Area', Name: 'Conference' }),
     xmlObject('Load', {
-      VID: 30,
+      VID: 13,
       ObjectType: 'Load',
-      Name: 'Fountain Pump',
-      LoadType: 'High Voltage Relay',
-      Area: 14,
+      Name: 'TABLE',
+      LoadType: 'LED Dim',
+      AreaID: 10,
     }),
-    xmlObject('DryContact', { VID: 200, ObjectType: 'DryContact', Name: 'Door', Area: 0 }),
-    xmlObject('OmniSensor', { VID: 201, ObjectType: 'OmniSensor', Name: 'Temp', Area: 0 }),
+    xmlObject('Load', {
+      VID: 609,
+      ObjectType: 'Load',
+      Name: 'FAN',
+      LoadType: 'High Voltage Relay',
+      AreaID: 8,
+    }),
+    xmlObject('DryContact', { VID: 200, ObjectType: 'DryContact', Name: 'Door', AreaID: 0 }),
   ]);
-  const validation = await infusion.parseAndValidateConfigurationXml(xml, 'tmp sensor filter test');
+  const validation = await infusion.parseAndValidateConfigurationXml(xml, 'tmp AreaID mapping test');
   await infusion.writeLegacyTmpCacheMirror(xml, validation);
 
   const dumped = fs.readFileSync(tmpMirrorPath, 'utf8');
-  assert.match(dumped, /<Load>/);
   assert.match(dumped, /<LoadType>High Voltage Relay<\/LoadType>/);
-  assert.match(dumped, /<Name>Fountain Pump<\/Name>/);
-  assert.doesNotMatch(dumped, /<DryContact>/);
-  assert.doesNotMatch(dumped, /<OmniSensor>/);
+  assert.match(dumped, /<AreaID>10<\/AreaID><Area>10<\/Area>/);
+  assert.match(dumped, /<AreaID>8<\/AreaID><Area>8<\/Area>/);
+  assert.match(dumped, /<DryContact>/);
+  assert.match(dumped, /<AreaID>0<\/AreaID><Area>0<\/Area>/);
+  assert.doesNotMatch(dumped, /<Name>Unassigned<\/Name>/);
 });
