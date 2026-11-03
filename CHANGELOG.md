@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] - 2026-11-03
+
+### Fixed
+- Write `/tmp/vantage.dc` as text-only elements so the SmarterHome iOS XML parser can convert it to JSON. Mixed content such as `<Parent>14<Position>1</Position></Parent>` made Organize Home fail; nested objects now keep only their text (e.g. `<Parent>14</Parent>`). Relay loads stay in the dump as `<Load>` objects.
+- Omit DryContact, Temperature, LightSensor, and OmniSensor from `/tmp/vantage.dc`. Those objects use Area `0`, and Organize Home aborts when it cannot map a HomeKit accessory to a room.
+
 ## [1.1.2] - 2026-11-03
 
 ### Fixed

@@ -65,6 +65,11 @@ const CONFIG_OBJECT_TYPES = CONFIGURATION_CONTROLLERS.flatMap((controller) => co
 
 const DISCOVERABLE_OBJECT_TYPES = CONFIG_OBJECT_TYPES.filter((type) => type !== 'Area');
 
+// Organize Home reads /tmp/vantage.dc. Lighting relays stay: they are Load objects.
+// DryContact/Temperature/OmniSensor use Area 0, and the iOS organizer aborts when a
+// HomeKit VID maps to a missing room. Formula/Track nested objects are also unused.
+const LEGACY_TMP_EXCLUDED_TYPES = new Set(['DryContact', 'Temperature', 'LightSensor', 'OmniSensor']);
+
 interface Options {
   ipaddress: string;
   username: string;
@@ -1199,41 +1204,43 @@ export class VantageInfusion extends EventEmitter {
       .replace(/'/g, '&apos;');
   }
 
-  /** Recreate nested XML the way the original xml2json toXml dump did. */
-  private static serializeXmlContent(value: unknown): string {
-    if (value === undefined || value === null) return '';
+  /**
+   * The SmarterHome iOS Organize Home parser (`ParseXMLData.swift`) only accepts
+   * text-only elements. Mixed content and attributes make JSONSerialization fail.
+   * Nested objects keep xml2js `_` text when present (e.g. Parent VID) and are
+   * otherwise omitted. Relay loads stay: they are `<Load>` objects, not DryContacts.
+   */
+  private static serializeXmlElement(name: string, value: unknown): string {
+    if (value === undefined || value === null) return `<${name}></${name}>`;
     if (typeof value !== 'object') {
-      return VantageInfusion.escapeXml(String(value));
+      return `<${name}>${VantageInfusion.escapeXml(String(value))}</${name}>`;
     }
-
     if (Array.isArray(value)) {
-      return value.map((item) => VantageInfusion.serializeXmlContent(item)).join('');
+      return value.map((item) => VantageInfusion.serializeXmlElement(name, item)).join('');
     }
 
     const record = value as Record<string, unknown>;
-    // xml2js stores character data in `_`. Emitting `<_>` collides with that charkey
-    // on re-parse and throws `obj[charkey].match is not a function`.
     const text = record._;
-    const textXml =
-      text === undefined || text === null
-        ? ''
-        : typeof text === 'object'
-          ? VantageInfusion.serializeXmlContent(text)
-          : VantageInfusion.escapeXml(String(text));
+    if (text !== undefined && text !== null && typeof text !== 'object') {
+      return `<${name}>${VantageInfusion.escapeXml(String(text))}</${name}>`;
+    }
 
-    const children = Object.entries(record)
-      .filter(([key]) => key && key !== '$' && key !== '_' && VantageInfusion.isXmlName(key))
-      .map(([key, child]) => {
-        if (Array.isArray(child)) {
-          return child
-            .map((item) => `<${key}>${VantageInfusion.serializeXmlContent(item)}</${key}>`)
-            .join('');
+    const children: string[] = [];
+    for (const [key, child] of Object.entries(record)) {
+      if (!key || key === '$' || key === '_' || !VantageInfusion.isXmlName(key)) continue;
+      if (child !== null && typeof child === 'object') {
+        const nestedText = (child as Record<string, unknown>)._;
+        if (nestedText !== undefined && nestedText !== null && typeof nestedText !== 'object') {
+          children.push(`<${key}>${VantageInfusion.escapeXml(String(nestedText))}</${key}>`);
         }
-        return `<${key}>${VantageInfusion.serializeXmlContent(child)}</${key}>`;
-      })
-      .join('');
+        continue;
+      }
+      children.push(
+        `<${key}>${child === undefined || child === null ? '' : VantageInfusion.escapeXml(String(child))}</${key}>`,
+      );
+    }
 
-    return `${textXml}${children}`;
+    return `<${name}>${children.join('')}</${name}>`;
   }
 
   private static isXmlName(key: string): boolean {
@@ -1244,11 +1251,16 @@ export class VantageInfusion extends EventEmitter {
   private buildCacheXml(readObjects: any[]): string {
     const frag = readObjects.map((o) => {
       const k = Object.keys(o)[0];
-      const v = o[k];
-      const body = VantageInfusion.serializeXmlContent(v);
-      return `<Object><${k}>${body}</${k}></Object>`;
+      return `<Object>${VantageInfusion.serializeXmlElement(k, o[k])}</Object>`;
     }).join('');
     return `<Project><Objects>${frag}</Objects></Project>`;
+  }
+
+  private objectsForLegacyTmpDump(objects: any[]): any[] {
+    return objects.filter((raw) => {
+      const key = Object.keys(raw)[0];
+      return Boolean(key) && !LEGACY_TMP_EXCLUDED_TYPES.has(key);
+    });
   }
 
   private pullConfigurationXml(): Promise<string> {
@@ -1559,18 +1571,22 @@ export class VantageInfusion extends EventEmitter {
     const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
 
     try {
-      fs.writeFileSync(tmpPath, xml, 'utf8');
-      const tmpXml = fs.readFileSync(tmpPath, 'utf8');
-      const validation = await this.parseAndValidateConfigurationXml(tmpXml, `legacy temporary cache mirror ${tmpPath}`);
-      if (validation.relevantObjectCount !== candidateValidation.relevantObjectCount) {
-        throw new Error(
-          `legacy cache mirror validation mismatch: ${validation.relevantObjectCount} relevant objects ` +
-            `vs ${candidateValidation.relevantObjectCount} expected`,
-        );
+      const tmpXml = this.buildCacheXml(this.objectsForLegacyTmpDump(candidateValidation.objects));
+      fs.writeFileSync(tmpPath, tmpXml, 'utf8');
+      const writtenXml = fs.readFileSync(tmpPath, 'utf8');
+      const validation = await this.parseAndValidateConfigurationXml(
+        writtenXml,
+        `legacy temporary cache mirror ${tmpPath}`,
+      );
+      if (validation.relevantObjectCount === 0) {
+        throw new Error('legacy cache mirror has no discoverable Vantage objects');
       }
 
       fs.renameSync(tmpPath, cachePath);
-      this.opts.log.info(`Legacy /tmp Vantage cache mirror updated at ${cachePath}`);
+      this.opts.log.info(
+        `Legacy /tmp Vantage cache mirror updated at ${cachePath} ` +
+          `(${validation.relevantObjectCount} Organize Home objects; sensors omitted)`,
+      );
     } catch (error) {
       try {
         if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);

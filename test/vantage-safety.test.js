@@ -515,23 +515,26 @@ test('nearby thermostat helper contacts and temperatures are not registered as s
   ]);
 });
 
-test('cache XML keeps nested object fields as elements instead of flattening them', () => {
+test('cache XML keeps relay loads and drops nested objects with no text', () => {
   const infusion = makeInfusion();
   const xml = infusion.buildCacheXml([
     {
       Load: {
         VID: '10',
         Name: 'Kitchen',
+        LoadType: 'High Voltage Relay',
         Device: { Address: '1.2.3', Channel: '4' },
       },
     },
   ]);
 
-  assert.match(xml, /<Device><Address>1\.2\.3<\/Address><Channel>4<\/Channel><\/Device>/);
+  assert.match(xml, /<VID>10<\/VID>/);
+  assert.match(xml, /<LoadType>High Voltage Relay<\/LoadType>/);
+  assert.doesNotMatch(xml, /<Device>/);
   assert.doesNotMatch(xml, /\[object Object\]/);
 });
 
-test('cache XML round-trips xml2js mixed-content objects without emitting charkey tags', async () => {
+test('cache XML emits xml2js mixed-content objects as text-only tags for Organize Home', async () => {
   const infusion = makeInfusion();
   const xml = infusion.buildCacheXml([
     {
@@ -539,14 +542,19 @@ test('cache XML round-trips xml2js mixed-content objects without emitting charke
         VID: '10',
         ObjectType: 'Load',
         Name: 'Kitchen',
-        LoadType: 'LED non-Dim',
+        LoadType: 'Low Voltage Relay',
+        Parent: { _: '14', Position: '1' },
         Device: { _: 'raw device text', Address: '1.2.3' },
       },
     },
   ]);
 
   assert.doesNotMatch(xml, /<_>/);
-  assert.match(xml, /<Device>raw device text<Address>1\.2\.3<\/Address><\/Device>/);
+  assert.doesNotMatch(xml, /<Parent>14<Position>/);
+  assert.doesNotMatch(xml, / Position="/);
+  assert.match(xml, /<Parent>14<\/Parent>/);
+  assert.match(xml, /<Device>raw device text<\/Device>/);
+  assert.match(xml, /<LoadType>Low Voltage Relay<\/LoadType>/);
 
   const parsed = await infusion.parseAndValidateConfigurationXml(xml, 'mixed-content cache xml');
   assert.equal(parsed.relevantObjectCount, 1);
@@ -567,4 +575,35 @@ test('persistent cache fallback refreshes the Organize Home /tmp dump', async ()
   await infusion.loadPersistentCache({ refreshLegacyTmpMirror: true });
 
   assert.equal(fs.readFileSync(tmpMirrorPath, 'utf8'), cachedXml);
+});
+
+test('Organize Home tmp dump keeps relay loads and omits Area-0 sensors', async () => {
+  const storagePath = fs.mkdtempSync(path.join(os.tmpdir(), 'vantage-cache-test-'));
+  const tmpMirrorPath = path.join(storagePath, 'vantage.dc');
+  const infusion = makeInfusionWithOptions({
+    storagePath,
+    legacyTmpCachePath: tmpMirrorPath,
+  });
+
+  const xml = configuration([
+    ...loads(2, 20),
+    xmlObject('Load', {
+      VID: 30,
+      ObjectType: 'Load',
+      Name: 'Fountain Pump',
+      LoadType: 'High Voltage Relay',
+      Area: 14,
+    }),
+    xmlObject('DryContact', { VID: 200, ObjectType: 'DryContact', Name: 'Door', Area: 0 }),
+    xmlObject('OmniSensor', { VID: 201, ObjectType: 'OmniSensor', Name: 'Temp', Area: 0 }),
+  ]);
+  const validation = await infusion.parseAndValidateConfigurationXml(xml, 'tmp sensor filter test');
+  await infusion.writeLegacyTmpCacheMirror(xml, validation);
+
+  const dumped = fs.readFileSync(tmpMirrorPath, 'utf8');
+  assert.match(dumped, /<Load>/);
+  assert.match(dumped, /<LoadType>High Voltage Relay<\/LoadType>/);
+  assert.match(dumped, /<Name>Fountain Pump<\/Name>/);
+  assert.doesNotMatch(dumped, /<DryContact>/);
+  assert.doesNotMatch(dumped, /<OmniSensor>/);
 });
