@@ -531,6 +531,27 @@ test('cache XML keeps nested object fields as elements instead of flattening the
   assert.doesNotMatch(xml, /\[object Object\]/);
 });
 
+test('cache XML round-trips xml2js mixed-content objects without emitting charkey tags', async () => {
+  const infusion = makeInfusion();
+  const xml = infusion.buildCacheXml([
+    {
+      Load: {
+        VID: '10',
+        ObjectType: 'Load',
+        Name: 'Kitchen',
+        LoadType: 'LED non-Dim',
+        Device: { _: 'raw device text', Address: '1.2.3' },
+      },
+    },
+  ]);
+
+  assert.doesNotMatch(xml, /<_>/);
+  assert.match(xml, /<Device>raw device text<Address>1\.2\.3<\/Address><\/Device>/);
+
+  const parsed = await infusion.parseAndValidateConfigurationXml(xml, 'mixed-content cache xml');
+  assert.equal(parsed.relevantObjectCount, 1);
+});
+
 test('persistent cache fallback refreshes the Organize Home /tmp dump', async () => {
   const storagePath = fs.mkdtempSync(path.join(os.tmpdir(), 'vantage-cache-test-'));
   const tmpMirrorPath = path.join(storagePath, 'vantage.dc');

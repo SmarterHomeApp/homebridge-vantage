@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-11-03
+
+### Fixed
+- Stop emitting xml2js `_` character data as `<_>` tags in reconstructed configuration XML. That threw `obj[charkey].match is not a function` and rejected a valid live download.
+
 ## [1.1.1] - 2026-11-03
 
 ### Fixed

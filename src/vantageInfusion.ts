@@ -1210,8 +1210,19 @@ export class VantageInfusion extends EventEmitter {
       return value.map((item) => VantageInfusion.serializeXmlContent(item)).join('');
     }
 
-    return Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => key && key !== '$')
+    const record = value as Record<string, unknown>;
+    // xml2js stores character data in `_`. Emitting `<_>` collides with that charkey
+    // on re-parse and throws `obj[charkey].match is not a function`.
+    const text = record._;
+    const textXml =
+      text === undefined || text === null
+        ? ''
+        : typeof text === 'object'
+          ? VantageInfusion.serializeXmlContent(text)
+          : VantageInfusion.escapeXml(String(text));
+
+    const children = Object.entries(record)
+      .filter(([key]) => key && key !== '$' && key !== '_' && VantageInfusion.isXmlName(key))
       .map(([key, child]) => {
         if (Array.isArray(child)) {
           return child
@@ -1221,6 +1232,12 @@ export class VantageInfusion extends EventEmitter {
         return `<${key}>${VantageInfusion.serializeXmlContent(child)}</${key}>`;
       })
       .join('');
+
+    return `${textXml}${children}`;
+  }
+
+  private static isXmlName(key: string): boolean {
+    return /^[:A-Z_a-z][\w:.\-]*$/.test(key);
   }
 
   /** Build cache XML from readObjects (same structure + sanitization as original index.js). */
