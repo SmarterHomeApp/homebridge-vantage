@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-11-03
+
+### Fixed
+- Do not treat an Area-only configuration download as complete. That was causing `no discoverable Vantage objects` after a child-bridge restart, especially with `usecache` disabled.
+- If live discovery fails and cache is off or missing, keep existing Homebridge accessories instead of failing startup.
+- After a plugin update, retry the configured controller IP before mDNS, and retry the live configuration download once. A busy InFusion during child-bridge SIGTERM was being treated as a dead IP.
+- Always write `/tmp/vantage.dc` from the configuration Homebridge actually uses, including persistent-cache fallback. Organize Home reads that dump, not the Homebridge storage cache, so a failed live download previously left it stale even with `usecache` on.
+- Serialize nested Vantage object fields as XML elements in `/tmp/vantage.dc` instead of `[object Object]`.
+
 ## [1.1.0] - 2026-11-02
 
 ### Added

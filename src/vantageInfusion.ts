@@ -79,6 +79,7 @@ interface Options {
   includeBlinds?: boolean;
   includeThermostats?: boolean;
   includeSensors?: boolean;
+  legacyTmpCachePath?: string;
 }
 
 interface ValidatedConfiguration {
@@ -135,22 +136,24 @@ export class VantageInfusion extends EventEmitter {
       this.isInsecureCmd = false;
       this.isInsecureCfg = false;
     } else {
-      // Probe sequentially to avoid controller session limits
-      let cmdResult = await this.portUsable(3001, 'STATUS ALL\n');
-      // brief backoff before probing config port
-      await new Promise((r) => setTimeout(r, 150));
-      let cfgResult = await this.portUsable(
-        2001,
-        '<IIntrospection><GetInterfaces><call></call></GetInterfaces></IIntrospection>\n',
-      );
+      let { cmd: cmdResult, cfg: cfgResult } = await this.probeInsecurePorts();
+
+      // Plugin updates SIGTERM child bridges and they both re-probe immediately.
+      // A busy InFusion looks identical to a dead IP; retry the configured address
+      // before treating it as gone and falling through to mDNS / SSL.
+      if (!cmdResult && !cfgResult && this.opts.ipaddress) {
+        for (const delayMs of [500, 1500]) {
+          this.opts.log.warn(
+            `Configured controller ${this.opts.ipaddress} did not respond; retrying port probe in ${delayMs}ms`,
+          );
+          await this.sleep(delayMs);
+          ({ cmd: cmdResult, cfg: cfgResult } = await this.probeInsecurePorts());
+          if (cmdResult || cfgResult) break;
+        }
+      }
 
       if (!cmdResult && !cfgResult && await this.discoverAndApplyController('configured controller did not respond')) {
-        cmdResult = await this.portUsable(3001, 'STATUS ALL\n');
-        await new Promise((r) => setTimeout(r, 150));
-        cfgResult = await this.portUsable(
-          2001,
-          '<IIntrospection><GetInterfaces><call></call></GetInterfaces></IIntrospection>\n',
-        );
+        ({ cmd: cmdResult, cfg: cfgResult } = await this.probeInsecurePorts());
       }
 
       this.isInsecureCmd = !!cmdResult;
@@ -164,13 +167,33 @@ export class VantageInfusion extends EventEmitter {
     try {
       await this.startCommand();
     } catch (error) {
-      if (await this.discoverAndApplyController('command socket failed to open')) {
+      this.opts.log.warn(`Command socket failed to open; retrying configured IP before mDNS: ${this.errorMessage(error)}`);
+      await this.sleep(1000);
+      try {
         await this.startCommand();
         return;
+      } catch (retryError) {
+        if (await this.discoverAndApplyController('command socket failed to open')) {
+          await this.startCommand();
+          return;
+        }
+        throw retryError;
       }
-
-      throw error;
     }
+  }
+
+  private sleep(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async probeInsecurePorts(): Promise<{ cmd: boolean; cfg: boolean }> {
+    const cmd = await this.portUsable(3001, 'STATUS ALL\n');
+    await this.sleep(150);
+    const cfg = await this.portUsable(
+      2001,
+      '<IIntrospection><GetInterfaces><call></call></GetInterfaces></IIntrospection>\n',
+    );
+    return { cmd, cfg };
   }
 
   private async ensureControllerAddress() {
@@ -495,51 +518,75 @@ export class VantageInfusion extends EventEmitter {
       await this.migrateLegacyCacheIfNeeded();
     }
 
-    try {
-      this.opts.log.info(`Attempting fresh Vantage configuration download from ${this.opts.ipaddress}`);
-      const xml = await this.pullConfigurationXml();
-      const validation = await this.parseAndValidateConfigurationXml(xml, 'downloaded configuration');
-      this.opts.log.info(
-        `Fresh Vantage controller configuration validated successfully (${validation.relevantObjectCount} relevant objects)`,
-      );
+    const attempts = 2;
+    let lastError: unknown;
 
-      if (this.opts.usecache) {
-        try {
-          await this.writePersistentCacheAtomically(xml, validation);
-        } catch (error) {
-          if (error instanceof CandidateConfigurationError) {
-            throw error;
-          }
-          this.opts.log.warn(`Persistent cache update failed; using live configuration for this run: ${this.errorMessage(error)}`);
-        }
-
-        await this.writeLegacyTmpCacheMirror(xml, validation);
-      }
-
-      // Legacy: "end configuration download"
-      this.opts.log.debug('VantagePlatform for InFusion Controller (end configuration download)');
-
-      const devices = await this.processConfigurationXml(xml, 'downloaded configuration');
-      this.opts.log.info('Fresh Vantage controller configuration loaded successfully');
-      return devices;
-    } catch (error) {
-      this.opts.log.warn(`Fresh controller discovery failed; attempting persistent fallback cache: ${this.errorMessage(error)}`);
-      if (!this.hasCredentials()) {
-        this.opts.log.warn(
-          'No Vantage username/password configured. If this controller requires authentication, add credentials in the Homebridge plugin config.',
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        this.opts.log.info(
+          `Attempting fresh Vantage configuration download from ${this.opts.ipaddress}` +
+            (attempt > 1 ? ` (retry ${attempt}/${attempts})` : ''),
         );
-      }
+        const xml = await this.pullConfigurationXml();
+        const validation = await this.parseAndValidateConfigurationXml(xml, 'downloaded configuration');
+        this.opts.log.info(
+          `Fresh Vantage controller configuration validated successfully (${validation.relevantObjectCount} relevant objects)`,
+        );
 
-      if (this.opts.usecache) {
-        try {
-          return await this.loadPersistentCache();
-        } catch (cacheError) {
-          this.opts.log.error(`Persistent cache unavailable; preserving existing Homebridge accessories: ${this.errorMessage(cacheError)}`);
+        if (this.opts.usecache) {
+          try {
+            await this.writePersistentCacheAtomically(xml, validation);
+          } catch (error) {
+            if (error instanceof CandidateConfigurationError) {
+              throw error;
+            }
+            this.opts.log.warn(`Persistent cache update failed; using live configuration for this run: ${this.errorMessage(error)}`);
+          }
+        }
+
+        // Always mirror a validated dump to /tmp/vantage.dc for Organize Home and other local tools.
+        // This is independent of usecache, which only controls Homebridge's persistent fallback.
+        await this.writeLegacyTmpCacheMirror(xml, validation);
+
+        // Legacy: "end configuration download"
+        this.opts.log.debug('VantagePlatform for InFusion Controller (end configuration download)');
+
+        const devices = await this.processConfigurationXml(xml, 'downloaded configuration');
+        this.opts.log.info('Fresh Vantage controller configuration loaded successfully');
+        return devices;
+      } catch (error) {
+        lastError = error;
+        this.opts.log.warn(
+          `Fresh controller discovery failed${attempt < attempts ? '; retrying after the controller session is free' : ''}: ${this.errorMessage(error)}`,
+        );
+        if (attempt < attempts) {
+          await this.sleep(2000);
         }
       }
-
-      throw error;
     }
+
+    if (!this.hasCredentials()) {
+      this.opts.log.warn(
+        'No Vantage username/password configured. If this controller requires authentication, add credentials in the Homebridge plugin config.',
+      );
+    }
+
+    if (this.opts.usecache) {
+      try {
+        return await this.loadPersistentCache({ refreshLegacyTmpMirror: true });
+      } catch (cacheError) {
+        this.opts.log.error(`Persistent cache unavailable; preserving existing Homebridge accessories: ${this.errorMessage(cacheError)}`);
+      }
+    } else {
+      this.opts.log.warn(
+        'Local cache is disabled; a failed live download has no last-known-good configuration to fall back to.',
+      );
+    }
+
+    this.opts.log.error(
+      `Live discovery failed; keeping existing Homebridge accessories instead of replacing them: ${this.errorMessage(lastError)}`,
+    );
+    return [];
   }
   
   private async processConfigurationXml(xml: string, source = 'configuration'): Promise<VantageDevice[]> {
@@ -840,7 +887,10 @@ export class VantageInfusion extends EventEmitter {
 
     const relevantObjectCount = objects.filter((object) => this.isRelevantConfigObject(object)).length;
     if (relevantObjectCount === 0) {
-      const message = `${source} rejected: configuration contains no discoverable Vantage objects`;
+      const summary = this.summarizeConfigObjectTypes(objects);
+      const message =
+        `${source} rejected: configuration contains no discoverable Vantage objects ` +
+        `(${objects.length} objects${summary ? `: ${summary}` : ''})`;
       this.opts.log.error(message);
       throw new Error(message);
     }
@@ -856,6 +906,18 @@ export class VantageInfusion extends EventEmitter {
     if (!value || typeof value !== 'object') return false;
 
     return this.isDiscoverableConfigObject(key, value);
+  }
+
+  private summarizeConfigObjectTypes(objects: any[]): string {
+    const counts = new Map<string, number>();
+    for (const object of objects) {
+      const key = object && typeof object === 'object' ? Object.keys(object)[0] : 'unknown';
+      counts.set(key || 'unknown', (counts.get(key || 'unknown') || 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((left, right) => right[1] - left[1])
+      .map(([type, count]) => `${type}=${count}`)
+      .join(', ');
   }
 
   private isDiscoverableConfigObject(key: string, it: any): boolean {
@@ -1082,13 +1144,20 @@ export class VantageInfusion extends EventEmitter {
       .toLowerCase();
   }
 
-  private async loadPersistentCache(): Promise<VantageDevice[]> {
+  private async loadPersistentCache(options: { refreshLegacyTmpMirror?: boolean } = {}): Promise<VantageDevice[]> {
     const cachePath = this.getPersistentCachePath();
     if (!fs.existsSync(cachePath)) {
       throw new Error(`persistent cache not found at ${cachePath}`);
     }
 
     const cachedXml = fs.readFileSync(cachePath, 'utf8');
+    const validation = await this.parseAndValidateConfigurationXml(
+      cachedXml,
+      `persistent last-known-good cache ${cachePath}`,
+    );
+    if (options.refreshLegacyTmpMirror) {
+      await this.writeLegacyTmpCacheMirror(cachedXml, validation);
+    }
     const devices = await this.processConfigurationXml(cachedXml, `persistent last-known-good cache ${cachePath}`);
     this.opts.log.warn(`Using persistent last-known-good Vantage configuration from ${cachePath}`);
     return devices;
@@ -1130,12 +1199,36 @@ export class VantageInfusion extends EventEmitter {
       .replace(/'/g, '&apos;');
   }
 
+  /** Recreate nested XML the way the original xml2json toXml dump did. */
+  private static serializeXmlContent(value: unknown): string {
+    if (value === undefined || value === null) return '';
+    if (typeof value !== 'object') {
+      return VantageInfusion.escapeXml(String(value));
+    }
+
+    if (Array.isArray(value)) {
+      return value.map((item) => VantageInfusion.serializeXmlContent(item)).join('');
+    }
+
+    return Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => key && key !== '$')
+      .map(([key, child]) => {
+        if (Array.isArray(child)) {
+          return child
+            .map((item) => `<${key}>${VantageInfusion.serializeXmlContent(item)}</${key}>`)
+            .join('');
+        }
+        return `<${key}>${VantageInfusion.serializeXmlContent(child)}</${key}>`;
+      })
+      .join('');
+  }
+
   /** Build cache XML from readObjects (same structure + sanitization as original index.js). */
   private buildCacheXml(readObjects: any[]): string {
     const frag = readObjects.map((o) => {
       const k = Object.keys(o)[0];
       const v = o[k];
-      const body = Object.keys(v).map((kk) => `<${kk}>${VantageInfusion.escapeXml(String(v[kk]))}</${kk}>`).join('');
+      const body = VantageInfusion.serializeXmlContent(v);
       return `<Object><${k}>${body}</${k}></Object>`;
     }).join('');
     return `<Project><Objects>${frag}</Objects></Project>`;
@@ -1174,17 +1267,39 @@ export class VantageInfusion extends EventEmitter {
         // progress watchdog: if we stop seeing new parsable states, finish with what we have
         let lastProgress = Date.now();
         const progress = () => { lastProgress = Date.now(); };
+        const hasDiscoverableObjects = () =>
+          readObjects.some((object) => this.isRelevantConfigObject(object));
+
+        const finishIfDownloadSettled = (reason: 'watchdog' | 'close') => {
+          if ((finishOnce as any)._done) return;
+          if (!readObjects.length) {
+            if (reason === 'close') {
+              failOnce(socket, new Error('Connection ended before Vantage configuration was downloaded'));
+            }
+            return;
+          }
+          if (!hasDiscoverableObjects()) {
+            if (reason === 'close') {
+              failOnce(socket, new Error('Configuration download ended before any discoverable Vantage objects arrived'));
+            }
+            return;
+          }
+          const xml = this.buildCacheXml(readObjects);
+          clearLoginFallback();
+          clearInterval(watchdog);
+          finishOnce(socket, xml);
+        };
+
         const watchdog = setInterval(() => {
           if ((finishOnce as any)._done) { clearInterval(watchdog); return; }
-          if (readObjects.length && Date.now() - lastProgress > 2000) {
-            const xml = this.buildCacheXml(readObjects);
-            clearInterval(watchdog);
-            finishOnce(socket, xml);
+          if (Date.now() - lastProgress > 2000) {
+            finishIfDownloadSettled('watchdog');
           }
         }, 750);
   
         const writeOpenFilter = () => {
           const type = CONFIG_OBJECT_TYPES[writeCount];
+          if (!type) return;
           this.opts.log.debug(`Requesting Vantage object type ${type} on controller ${controller.toString()}`);
           socket.write(
             `<?Master ${controller}?>` +
@@ -1346,32 +1461,16 @@ export class VantageInfusion extends EventEmitter {
   
         socket.on('end', () => {
           this.opts.log.debug(`Vantage configuration socket ended; completed=${shouldBreak}`);
-          if ((finishOnce as any)._done) return;
-          if (!(finishOnce as any)._done && readObjects.length) {
-            const xml = this.buildCacheXml(readObjects);
-            clearLoginFallback();
-            clearInterval(watchdog);
-            finishOnce(socket, xml);
-          } else {
-            clearLoginFallback();
-            clearInterval(watchdog);
-            failOnce(socket, new Error('Connection ended before Vantage configuration was downloaded'));
-          }
+          clearLoginFallback();
+          clearInterval(watchdog);
+          finishIfDownloadSettled('close');
         });
   
         socket.on('close', () => {
           this.opts.log.debug("closing " + shouldBreak)
-          if ((finishOnce as any)._done) return;
-          if (!(finishOnce as any)._done && readObjects.length) {
-            const xml = this.buildCacheXml(readObjects);
-            clearLoginFallback();
-            clearInterval(watchdog);
-            finishOnce(socket, xml);
-          } else {
-            clearLoginFallback();
-            clearInterval(watchdog);
-            failOnce(socket, new Error('Connection closed before Vantage configuration was downloaded'));
-          }
+          clearLoginFallback();
+          clearInterval(watchdog);
+          finishIfDownloadSettled('close');
         });
 
         socket.on('timeout', () => {
@@ -1434,8 +1533,12 @@ export class VantageInfusion extends EventEmitter {
     }
   }
 
+  private getLegacyTmpCachePath(): string {
+    return this.opts.legacyTmpCachePath || path.join('/tmp', 'vantage.dc');
+  }
+
   private async writeLegacyTmpCacheMirror(xml: string, candidateValidation: ValidatedConfiguration) {
-    const cachePath = path.join('/tmp', 'vantage.dc');
+    const cachePath = this.getLegacyTmpCachePath();
     const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
 
     try {
@@ -1450,7 +1553,7 @@ export class VantageInfusion extends EventEmitter {
       }
 
       fs.renameSync(tmpPath, cachePath);
-      this.opts.log.debug(`Legacy /tmp Vantage cache mirror updated at ${cachePath}`);
+      this.opts.log.info(`Legacy /tmp Vantage cache mirror updated at ${cachePath}`);
     } catch (error) {
       try {
         if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);

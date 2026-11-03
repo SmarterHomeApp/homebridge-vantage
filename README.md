@@ -62,7 +62,7 @@ npm install -g @smarterhomeapp/homebridge-vantage
 | `username` | string | No | Username for authentication. If login fails or times out, the plugin still attempts the configuration download. The common typo `admin` is retried as `administrator`. |
 | `password` | string | No | Password for authentication. Used with `username`; a rejected login does not skip discovery. |
 | `forceSSL` | boolean | No | Skip insecure ports and use 3010/2010 directly (default: false) |
-| `usecache` | boolean | No | Maintain a persistent last-known-good configuration fallback while still attempting fresh controller discovery on every startup (default: true) |
+| `usecache` | boolean | No | Maintain a persistent last-known-good configuration fallback while still attempting fresh controller discovery on every startup (default: true). If this is off and a live download fails, existing HomeKit accessories are kept. |
 | `includeLights` | boolean | No | Include Vantage loads, dimmers, relays, RGB loads, and similar switch/light devices (default: true) |
 | `includeBlinds` | boolean | No | Include Vantage blinds, shades, and window coverings (default: true) |
 | `includeThermostats` | boolean | No | Include Vantage thermostats and HVAC zones (default: true) |
@@ -77,6 +77,8 @@ On each Homebridge startup, the plugin first attempts to download the current Va
 When `usecache` is enabled, the persistent cache is only a fallback. If the controller is offline, returns malformed XML, returns an empty configuration, or returns a suspiciously incomplete configuration, the plugin preserves the existing cache and uses the last-known-good configuration instead.
 
 The cache is stored under Homebridge's configured storage directory in a plugin-specific `vantage` folder. Cache filenames are keyed by controller IP, for example `vantage-10.0.0.100.dc`, so multiple platform instances using different VID ranges for the same controller share one full-controller cache. Restarts naturally pick up controller/DC changes; users do not need to manually clear the cache.
+
+The plugin also writes a copy to `/tmp/vantage.dc` for local tools such as Organize Home. That dump is updated from the configuration Homebridge actually uses: a successful live download, or the persistent last-known-good cache if live discovery fails. Incomplete or rejected downloads are not written there.
 
 ## HomeKit Accessory Limit and Child Bridges
 

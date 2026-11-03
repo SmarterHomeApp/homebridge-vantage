@@ -63,6 +63,16 @@ function loads(count, startVid = 1) {
   }));
 }
 
+test('area-only configuration is rejected as having no discoverable objects', async () => {
+  const infusion = makeInfusion();
+  const xml = configuration([xmlObject('Area', { VID: 1, Name: 'Kitchen', ObjectType: 'Area' })]);
+
+  await assert.rejects(
+    () => infusion.parseAndValidateConfigurationXml(xml, 'area-only test configuration'),
+    /no discoverable Vantage objects \(1 objects: Area=1\)/,
+  );
+});
+
 test('malformed XML is rejected instead of becoming an empty discovery', async () => {
   const infusion = makeInfusion();
 
@@ -503,4 +513,37 @@ test('nearby thermostat helper contacts and temperatures are not registered as s
     ['131', 'thermostat'],
     ['200', 'contact'],
   ]);
+});
+
+test('cache XML keeps nested object fields as elements instead of flattening them', () => {
+  const infusion = makeInfusion();
+  const xml = infusion.buildCacheXml([
+    {
+      Load: {
+        VID: '10',
+        Name: 'Kitchen',
+        Device: { Address: '1.2.3', Channel: '4' },
+      },
+    },
+  ]);
+
+  assert.match(xml, /<Device><Address>1\.2\.3<\/Address><Channel>4<\/Channel><\/Device>/);
+  assert.doesNotMatch(xml, /\[object Object\]/);
+});
+
+test('persistent cache fallback refreshes the Organize Home /tmp dump', async () => {
+  const storagePath = fs.mkdtempSync(path.join(os.tmpdir(), 'vantage-cache-test-'));
+  const tmpMirrorPath = path.join(storagePath, 'vantage.dc');
+  const infusion = makeInfusionWithOptions({
+    storagePath,
+    legacyTmpCachePath: tmpMirrorPath,
+  });
+
+  const cachedXml = configuration(loads(5, 20));
+  const validation = await infusion.parseAndValidateConfigurationXml(cachedXml, 'persistent cache mirror test');
+  await infusion.writePersistentCacheAtomically(cachedXml, validation);
+
+  await infusion.loadPersistentCache({ refreshLegacyTmpMirror: true });
+
+  assert.equal(fs.readFileSync(tmpMirrorPath, 'utf8'), cachedXml);
 });
